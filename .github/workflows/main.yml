@@ -1,4 +1,4 @@
-name: RDP
+name: Garena
 
 on:
   workflow_dispatch:
