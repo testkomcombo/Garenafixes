@@ -51,7 +51,7 @@ jobs:
       - name: Create RDP User
         run: |
           $username = "kaiden"
-          $password = "amaalik1"
+          $password = "${{ secrets.RDP_PASSWORD }}"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
           New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
