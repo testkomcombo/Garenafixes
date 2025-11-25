@@ -96,7 +96,7 @@ jobs:
       - name: Set VNC Password
         run: |
           # Set VNC password for screen sharing
-          echo "amaalik1" | sudo perl -we '
+          echo "@amaalik15" | sudo perl -we '
             $pw = <STDIN>;
             chomp $pw;
             @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
@@ -213,7 +213,7 @@ jobs:
           echo "  -or-      vnc://$TAILSCALE_IP"
           echo ""
           echo "  Username: kaiden"
-          echo "  Password: amaalik1"
+          echo "  Password: @Amaalik15"
           echo ""
           echo "EXIT NODE:"
           echo "  Hostname: macos-runner-${{ github.run_id }}"
