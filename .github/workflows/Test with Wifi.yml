@@ -1,0 +1,166 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-UDP" `
+            dir=in action=allow protocol=UDP localport=3389
+          Restart-Service -Name TermService -Force
+
+      - name: Optimize RDP Performance Settings
+        run: |
+          $tsClientPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+          $rdpTcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+          
+          # Enable UDP Transport
+          New-ItemProperty -Path $tsClientPath -Name "SelectTransport" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # 60 FPS
+          New-ItemProperty -Path $rdpTcpPath -Name "MaxFrameRate" -Value 60 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsClientPath -Name "MaxFrameRate" -Value 60 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Hardware acceleration
+          New-ItemProperty -Path $tsClientPath -Name "AVCHardwareEncodePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsClientPath -Name "AVC444ModePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Disable throttling
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name "ThrottleEnabled" -Value 0 -Force -ErrorAction SilentlyContinue
+          
+          # Network optimization
+          $tcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
+          New-ItemProperty -Path $tcpPath -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "TCPNoDelay" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+
+      - name: Enable Dark Theme & Optimize Visuals
+        run: |
+          reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
+          
+          # Dark theme
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v AppsUseLightTheme /t REG_DWORD /d 0 /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 0 /f
+          
+          # Performance visuals
+          reg add "HKU\DefaultUser\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d "2" /f
+          reg add "HKU\DefaultUser\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d "0" /f
+          
+          [gc]::Collect()
+          Start-Sleep -Seconds 2
+          reg unload HKU\DefaultUser
+
+      - name: Set High Performance Power Plan
+        run: |
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 bc5038f7-23e0-4960-96da-33abaf5935ec 100
+          powercfg /setactive SCHEME_CURRENT
+
+      - name: Disable Password Complexity Policy
+        run: |
+          secedit /export /cfg C:\secpol.cfg
+          (Get-Content C:\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
+          (Get-Content C:\secpol.cfg) -replace "MinimumPasswordLength = \d+", "MinimumPasswordLength = 1" | Set-Content C:\secpol.cfg
+          secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+          Remove-Item C:\secpol.cfg -Force
+
+      - name: Create RDP User
+        run: |
+          $username = "kaiden"
+          $password = "@Amaalik15"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+
+      - name: Restart RDP Service
+        run: |
+          Restart-Service -Name TermService -Force
+          Start-Sleep -Seconds 3
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection with Exit Node
+        run: |
+          # Enable IP forwarding for exit node functionality
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'IPEnableRouter' -Value 1 -Force
+          
+          # Start Tailscale with exit node advertisement
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-runner-$env:GITHUB_RUN_ID `
+            --advertise-exit-node `
+            --accept-routes
+          
+          # Wait for Tailscale IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+     
+      - name: Verify RDP Accessibility
+        run: |
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+
+      - name: Maintain Connection
+        run: |
+          Write-Host ""
+          Write-Host "============================================" -ForegroundColor Cyan
+          Write-Host "    RDP + EXIT NODE (VPN) ACCESS            " -ForegroundColor Cyan
+          Write-Host "============================================" -ForegroundColor Cyan
+          Write-Host ""
+          Write-Host "RDP CONNECTION:" -ForegroundColor Yellow
+          Write-Host "  Address:  $env:TAILSCALE_IP" -ForegroundColor Green
+          Write-Host "  Username: kaiden" -ForegroundColor Green
+          Write-Host "  Password: @Amaalik15" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "EXIT NODE (USE AS VPN):" -ForegroundColor Yellow
+          Write-Host "  1. Go to Tailscale Admin Console" -ForegroundColor White
+          Write-Host "  2. Find: gh-runner-$env:GITHUB_RUN_ID" -ForegroundColor White
+          Write-Host "  3. Click '...' > Edit route settings" -ForegroundColor White
+          Write-Host "  4. Enable 'Use as exit node'" -ForegroundColor White
+          Write-Host ""
+          Write-Host "ON YOUR DEVICE:" -ForegroundColor Yellow
+          Write-Host "  - Open Tailscale app" -ForegroundColor White
+          Write-Host "  - Click 'Exit Node'" -ForegroundColor White
+          Write-Host "  - Select 'gh-runner-...'" -ForegroundColor White
+          Write-Host ""
+          Write-Host "============================================" -ForegroundColor Cyan
+          
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP + Exit Node Active"
+              Start-Sleep -Seconds 300
+          }
