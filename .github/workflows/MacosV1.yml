@@ -1,0 +1,240 @@
+name: macOS-Remote
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Get macOS Version Info
+        run: |
+          echo "macOS Version:"
+          sw_vers
+          echo ""
+          echo "Hardware:"
+          system_profiler SPHardwareDataType | grep -E "Model|Chip|Memory|Cores"
+
+      - name: Create User Account
+        run: |
+          # Create user 'kaiden' with password 'amaalik1'
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "amaalik1"
+          
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          
+          # Create home directory
+          sudo createhomedir -c -u kaiden
+          
+          # Allow user to access screen sharing
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          
+          echo "User 'kaiden' created successfully!"
+
+      - name: Enable Remote Management & Screen Sharing
+        run: |
+          # Method 1: Enable Remote Management (ARD) with all privileges
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+          
+          # Method 2: Enable Screen Sharing service
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          
+          # Enable the service
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
+          
+          # Start Screen Sharing
+          sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
+          sudo launchctl start com.apple.screensharing 2>/dev/null || true
+          
+          echo "Remote Management enabled!"
+
+      - name: Fix Screen Recording Permissions (TCC Database)
+        run: |
+          # This is the KEY fix for black screen issue
+          
+          # Get TCC database path
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          # Backup existing TCC database
+          sudo cp "$TCC_DB" "$TCC_DB.backup" 2>/dev/null || true
+          
+          # Grant screen recording permission to screensharing agent
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceScreenCapture' AND client='com.apple.screensharing.agent';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.screensharing.agent', 0, 2, 0, 1);" 2>/dev/null || true
+          
+          # Grant to Remote Management
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceScreenCapture' AND client='com.apple.RemoteDesktop.agent';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.RemoteDesktop.agent', 0, 2, 0, 1);" 2>/dev/null || true
+          
+          # Grant to screencapture utility
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', '/usr/sbin/screencapture', 1, 2, 0, 1);" 2>/dev/null || true
+          
+          # Grant post-event access
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServicePostEvent', 'com.apple.screensharing.agent', 0, 2, 0, 1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServicePostEvent', 'com.apple.RemoteDesktop.agent', 0, 2, 0, 1);" 2>/dev/null || true
+          
+          # Accessibility access
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceAccessibility', 'com.apple.screensharing.agent', 0, 2, 0, 1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceAccessibility', 'com.apple.RemoteDesktop.agent', 0, 2, 0, 1);" 2>/dev/null || true
+          
+          echo "TCC permissions granted!"
+
+      - name: Set VNC Password
+        run: |
+          # Set VNC password for screen sharing
+          echo "amaalik1" | sudo perl -we '
+            $pw = <STDIN>;
+            chomp $pw;
+            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
+            @p = unpack "C*", $pw;
+            foreach (0..length($pw)-1) {
+              $p[$_] ^= $k[$_];
+            }
+            print pack "C*", @p;
+          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          
+          # Alternative: Set password via defaults
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCPassword -data "$(echo -n 'amaalik1' | xxd -p)"
+          
+          echo "VNC password set!"
+
+      - name: Configure Screen Sharing Settings
+        run: |
+          # Allow all users to screen share
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement LoadRemoteManagementMenuExtra -bool false
+          
+          # Disable screen lock
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword -bool false
+          
+          echo "Screen sharing configured!"
+
+      - name: Restart Remote Services
+        run: |
+          # Restart ARD Agent
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -menu
+          
+          # Ensure services are running
+          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
+          
+          sleep 3
+          
+          # Verify services
+          echo "Checking services..."
+          sudo launchctl list | grep -E "screensharing|RemoteManagement" || echo "Services may not show but can still work"
+
+      - name: Login to GUI Session
+        run: |
+          # This creates an active GUI session (important for screen sharing)
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -users kaiden \
+            -access -on \
+            -privs -all \
+            -restart -agent
+          
+          # Enable auto-login for kaiden (creates GUI session)
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
+          
+          # Simulate GUI session activation
+          sudo launchctl asuser $(id -u kaiden) open -a "Finder" 2>/dev/null || true
+
+      - name: Install Tailscale
+        run: |
+          # Download Tailscale
+          curl -L -o /tmp/tailscale.pkg "https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg"
+          
+          # Install Tailscale
+          sudo installer -pkg /tmp/tailscale.pkg -target /
+          
+          # Cleanup
+          rm /tmp/tailscale.pkg
+          
+          echo "Tailscale installed!"
+
+      - name: Connect Tailscale with Exit Node
+        run: |
+          # Enable IP forwarding
+          sudo sysctl -w net.inet.ip.forwarding=1
+          sudo sysctl -w net.inet6.ip6.forwarding=1
+          
+          # Start Tailscale daemon
+          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=macos-runner-${{ github.run_id }} \
+            --advertise-exit-node \
+            --accept-routes \
+            --accept-dns=false
+          
+          # Wait for IP
+          sleep 10
+          
+          # Get Tailscale IP
+          TS_IP=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          
+          echo "Tailscale connected! IP: $TS_IP"
+
+      - name: Verify VNC Port
+        run: |
+          # Check if VNC port 5900 is listening
+          echo "Checking VNC port..."
+          lsof -i :5900 || echo "Port 5900 not showing but may still work"
+          
+          # Check ARD agent
+          ps aux | grep -i ard || true
+          ps aux | grep -i screensharing || true
+
+      - name: Display Connection Info
+        run: |
+          echo ""
+          echo "============================================"
+          echo "        macOS VNC ACCESS READY              "
+          echo "============================================"
+          echo ""
+          echo "VNC CONNECTION (Use VNC client, NOT RDP):"
+          echo "  Address:  $TAILSCALE_IP:5900"
+          echo "  -or-      vnc://$TAILSCALE_IP"
+          echo ""
+          echo "  Username: kaiden"
+          echo "  Password: amaalik1"
+          echo ""
+          echo "EXIT NODE:"
+          echo "  Hostname: macos-runner-${{ github.run_id }}"
+          echo ""
+          echo "VNC CLIENTS:"
+          echo "  - macOS: Built-in Screen Sharing"
+          echo "  - Windows: RealVNC, TightVNC"
+          echo "  - Linux: Remmina, Vinagre"
+          echo "  - iPhone: RealVNC Viewer"
+          echo "  - Android: RealVNC Viewer"
+          echo ""
+          echo "============================================"
+
+      - name: Keep Alive
+        run: |
+          echo "macOS remote session active..."
+          while true; do
+            echo "[$(date)] Session active - VNC: $TAILSCALE_IP:5900"
+            
+            # Keep GUI session alive
+            sudo launchctl asuser $(id -u kaiden) caffeinate -u -t 60 2>/dev/null || true
+            
+            sleep 300
+          done
