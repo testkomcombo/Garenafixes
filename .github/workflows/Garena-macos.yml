@@ -63,12 +63,25 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
 
-      - name: Set 16:9 Resolution (1280x720)
+      - name: Find and Set Best Resolution
         run: |
           brew install displayplacer
           
-          # Use 720p (16:9 ratio - will scale properly to your 1366x768)
-          displayplacer "id:1 res:1280x720 hz:60 color_depth:8 scaling:off" || echo "Using default"
+          echo "=== Available Resolutions ==="
+          displayplacer list
+          echo ""
+          
+          # Try resolutions in order (best 16:9 first)
+          for res in "1920x1080" "1600x900" "1366x768" "1360x768" "1280x720" "1680x1050" "1440x900" "1280x800"; do
+            if displayplacer "id:1 res:$res" 2>/dev/null; then
+              echo "SUCCESS: Set resolution to $res"
+              echo "RESOLUTION=$res" >> $GITHUB_ENV
+              exit 0
+            fi
+          done
+          
+          echo "RESOLUTION=default" >> $GITHUB_ENV
+          echo "Using default resolution"
 
       - name: Restart Services
         run: |
@@ -91,7 +104,7 @@ jobs:
           
           sleep 8
 
-      - name: Connect Tailscale (NO Exit Node)
+      - name: Connect Tailscale
         run: |
           sudo /opt/homebrew/opt/tailscale/bin/tailscale \
             --socket=/var/run/tailscale/tailscaled.sock \
@@ -114,7 +127,7 @@ jobs:
           echo "  Address:    $TAILSCALE_IP:5900"
           echo "  Username:   kaiden"
           echo "  Password:   amaalik1"
-          echo "  Resolution: 1280x720 (16:9)"
+          echo "  Resolution: $RESOLUTION"
           echo ""
           echo "============================================"
 
