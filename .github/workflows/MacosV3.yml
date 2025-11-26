@@ -1,4 +1,4 @@
-name: macOS-Remote V3
+name: Macos V3
 
 on:
   workflow_dispatch:
@@ -68,48 +68,37 @@ jobs:
           brew install displayplacer
           displayplacer "id:1 res:1920x1080 hz:60 color_depth:7"
 
-      - name: Optimize Network for Long Distance (USA → Morocco)
+      - name: Optimize Network for Long Distance
         run: |
           # Increase network buffer sizes
-          sudo sysctl -w net.inet.tcp.sendspace=2097152
-          sudo sysctl -w net.inet.tcp.recvspace=2097152
-          sudo sysctl -w net.inet.tcp.autorcvbufmax=4194304
-          sudo sysctl -w net.inet.tcp.autosndbufmax=4194304
+          sudo sysctl -w net.inet.tcp.sendspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.recvspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.autorcvbufmax=4194304 || true
+          sudo sysctl -w net.inet.tcp.autosndbufmax=4194304 || true
           
           # Enable TCP optimizations
-          sudo sysctl -w net.inet.tcp.delayed_ack=0
-          sudo sysctl -w net.inet.tcp.mssdflt=1460
-          sudo sysctl -w net.inet.tcp.win_scale_factor=8
-          sudo sysctl -w net.inet.tcp.slowstart_flightsize=20
-          sudo sysctl -w net.inet.tcp.local_slowstart_flightsize=20
-          
-          # Disable Nagle's algorithm for lower latency
-          sudo sysctl -w net.inet.tcp.delayed_ack=0
+          sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
+          sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
+          sudo sysctl -w net.inet.tcp.win_scale_factor=8 || true
           
           # Keep connections alive
-          sudo sysctl -w net.inet.tcp.keepidle=10000
-          sudo sysctl -w net.inet.tcp.keepintvl=5000
-          sudo sysctl -w net.inet.tcp.keepcnt=10
+          sudo sysctl -w net.inet.tcp.keepidle=10000 || true
+          sudo sysctl -w net.inet.tcp.keepintvl=5000 || true
+          sudo sysctl -w net.inet.tcp.keepcnt=10 || true
           
           # Increase maximum connections
-          sudo sysctl -w kern.ipc.somaxconn=2048
-          sudo sysctl -w kern.ipc.maxsockbuf=8388608
+          sudo sysctl -w kern.ipc.somaxconn=2048 || true
+          sudo sysctl -w kern.ipc.maxsockbuf=8388608 || true
           
-          echo "Network optimized for long distance!"
+          echo "Network optimized!"
 
       - name: Install High Performance VNC Server
         run: |
-          # Install x11vnc for better performance options
-          brew install x11vnc
-          
-          # Install compression tools
-          brew install zstd lz4
-          
+          brew install x11vnc || true
           echo "VNC tools installed!"
 
       - name: Start Optimized VNC Server
         run: |
-          # Start x11vnc with maximum compression for long distance
           x11vnc \
             -display :0 \
             -forever \
@@ -117,43 +106,32 @@ jobs:
             -rfbport 5901 \
             -passwd amaalik1 \
             -noxdamage \
-            -nowf \
             -ncache 10 \
-            -ncache_cr \
             -threads \
             -nap \
             -wait 20 \
             -defer 10 \
-            -compresslevel 9 \
-            -quality 7 \
-            -bg
+            -bg \
+            || echo "x11vnc may not work, using standard VNC on 5900"
           
-          echo "Optimized VNC running on port 5901!"
+          echo "VNC configured!"
 
       - name: Install Brave Browser
         run: |
-          echo "Installing Brave Browser..."
           brew install --cask brave-browser
           echo "Brave installed!"
 
       - name: Install Firefox
         run: |
-          echo "Installing Firefox..."
           brew install --cask firefox
           echo "Firefox installed!"
 
-      - name: Create Browser Shortcuts on Desktop
+      - name: Create Browser Shortcuts
         run: |
-          # Create desktop shortcuts for kaiden
           sudo -u kaiden mkdir -p /Users/kaiden/Desktop
-          
-          # Brave shortcut
-          sudo -u kaiden ln -sf "/Applications/Brave Browser.app" "/Users/kaiden/Desktop/Brave Browser"
-          
-          # Firefox shortcut
-          sudo -u kaiden ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox"
-          
-          echo "Browser shortcuts created!"
+          sudo -u kaiden ln -sf "/Applications/Brave Browser.app" "/Users/kaiden/Desktop/Brave Browser" || true
+          sudo -u kaiden ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox" || true
+          echo "Shortcuts created!"
 
       - name: Restart Services
         run: |
@@ -193,32 +171,21 @@ jobs:
         run: |
           echo ""
           echo "============================================"
-          echo "   HIGH PERFORMANCE macOS VNC (Morocco)     "
+          echo "   HIGH PERFORMANCE macOS VNC              "
           echo "============================================"
           echo ""
-          echo "FAST VNC (Optimized for long distance):"
-          echo "  Address:    $TAILSCALE_IP:5901"
-          echo "  Password:   amaalik1"
+          echo "VNC ADDRESS:  $TAILSCALE_IP:5900"
+          echo "PASSWORD:     amaalik1"
+          echo "RESOLUTION:   1920x1080"
           echo ""
-          echo "Standard VNC (Backup):"
-          echo "  Address:    $TAILSCALE_IP:5900"
-          echo "  Username:   kaiden"
-          echo "  Password:   amaalik1"
-          echo ""
-          echo "Resolution:   1920x1080"
-          echo ""
-          echo "BROWSERS INSTALLED:"
-          echo "  - Brave Browser"
-          echo "  - Firefox"
+          echo "BROWSERS:     Brave, Firefox"
           echo ""
           echo "============================================"
 
       - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date)] Active"
-            echo "  Fast VNC: $TAILSCALE_IP:5901"
-            echo "  Standard VNC: $TAILSCALE_IP:5900"
+            echo "[$(date)] VNC: $TAILSCALE_IP:5900"
             caffeinate -u -t 60 &
             sleep 300
           done
