@@ -1,4 +1,4 @@
-name: macOS-Remote
+name: macOS-Remote2
 
 on:
   workflow_dispatch:
@@ -9,9 +9,8 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Get macOS Version Info
+      - name: Get macOS Version
         run: |
-          echo "macOS Version:"
           sw_vers
 
       - name: Create User Account
@@ -28,7 +27,7 @@ jobs:
           sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
           echo "User 'kaiden' created!"
 
-      - name: Enable Remote Management & Screen Sharing
+      - name: Enable Remote Management
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
@@ -39,46 +38,50 @@ jobs:
             -restart -agent -menu
           
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
-          
-          echo "Remote Management enabled!"
 
-      - name: Fix TCC Permissions (Black Screen Fix)
+      - name: Fix TCC Permissions
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.screensharing.agent', 0, 2, 0, 1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.RemoteDesktop.agent', 0, 2, 0, 1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServicePostEvent', 'com.apple.screensharing.agent', 0, 2, 0, 1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceAccessibility', 'com.apple.screensharing.agent', 0, 2, 0, 1);" 2>/dev/null || true
-          
-          echo "TCC permissions granted!"
 
       - name: Configure Screen Sharing
         run: |
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
-          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword -bool false
-          
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -menu
 
-      - name: Install Tailscale via Homebrew
+      - name: Install Tailscale
         run: |
-          # Install using Homebrew (gives us proper CLI)
           brew install tailscale
-          
           echo "Tailscale installed!"
 
       - name: Start Tailscale Daemon
         run: |
-          # Start tailscaled in background
-          sudo /opt/homebrew/opt/tailscale/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+          # Create directories
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
           
-          # Wait for daemon to start
-          sleep 5
+          # Start daemon with DEFAULT socket path
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tailscaled.log 2>&1 &
           
-          echo "Tailscale daemon started!"
+          # Wait for daemon
+          echo "Waiting for daemon to start..."
+          sleep 8
+          
+          # Verify daemon is running
+          if pgrep -x tailscaled > /dev/null; then
+            echo "Daemon is running!"
+          else
+            echo "Daemon failed. Log:"
+            cat /tmp/tailscaled.log
+            exit 1
+          fi
 
       - name: Connect Tailscale
         run: |
@@ -86,30 +89,32 @@ jobs:
           sudo sysctl -w net.inet.ip.forwarding=1
           sudo sysctl -w net.inet6.ip6.forwarding=1
           
-          # Connect Tailscale (non-blocking)
-          sudo /opt/homebrew/opt/tailscale/bin/tailscale up \
+          # Connect using SAME socket path as daemon
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=macos-runner-${{ github.run_id }} \
             --advertise-exit-node \
             --accept-routes
           
           # Wait for connection
-          sleep 10
+          sleep 5
           
-          # Get IP
-          TS_IP=$(/opt/homebrew/opt/tailscale/bin/tailscale ip -4)
+          # Get IP using same socket
+          TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
           
           echo "Connected! IP: $TS_IP"
 
       - name: Verify Services
         run: |
-          echo "Checking VNC port 5900..."
-          lsof -i :5900 || echo "Port check done"
+          echo "VNC port 5900:"
+          lsof -i :5900 || echo "Checked"
           
           echo ""
           echo "Tailscale status:"
-          /opt/homebrew/opt/tailscale/bin/tailscale status
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock status
 
       - name: Display Connection Info
         run: |
