@@ -1,0 +1,137 @@
+name: macOS-Remote 3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Get macOS Version
+        run: sw_vers
+
+      - name: Create User Account
+        run: |
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "amaalik1"
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo createhomedir -c -u kaiden
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+
+      - name: Enable Remote Management with Full Control
+        run: |
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -clientopts -setmenuextra -menuextra no \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw amaalik1 \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+
+      - name: Fix All TCC Permissions
+        run: |
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceScreenCapture';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServicePostEvent';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceAccessibility';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceListenEvent';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+
+      - name: Configure Screen Sharing
+        run: |
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+
+      - name: Set Screen Resolution 1366x768
+        run: |
+          # Install displayplacer
+          brew install displayplacer
+          
+          # Show available resolutions
+          echo "Available resolutions:"
+          displayplacer list
+          
+          # Set resolution
+          displayplacer "id:1 res:1366x768 hz:60 color_depth:8 scaling:off origin:(0,0)" || \
+          displayplacer "id:1 res:1368x768 hz:60 color_depth:8" || \
+          displayplacer "id:1 res:1360x768 hz:60 color_depth:8" || \
+          echo "Custom resolution may not be supported, trying closest..."
+          
+          echo "Resolution configured!"
+
+      - name: Restart Remote Services
+        run: |
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent -menu
+          sleep 3
+
+      - name: Install Tailscale
+        run: brew install tailscale
+
+      - name: Start Tailscale Daemon
+        run: |
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tailscaled.log 2>&1 &
+          
+          sleep 8
+
+      - name: Connect Tailscale
+        run: |
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=macos-runner-${{ github.run_id }}
+          
+          sleep 5
+          
+          TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Display Connection Info
+        run: |
+          echo ""
+          echo "============================================"
+          echo "        macOS VNC ACCESS READY              "
+          echo "============================================"
+          echo ""
+          echo "  Address:    $TAILSCALE_IP:5900"
+          echo "  Username:   kaiden"
+          echo "  Password:   amaalik1"
+          echo "  Resolution: 1366x768"
+          echo ""
+          echo "============================================"
+
+      - name: Keep Alive
+        run: |
+          while true; do
+            echo "[$(date)] Active - VNC: $TAILSCALE_IP:5900"
+            caffeinate -u -t 60 &
+            sleep 300
+          done
