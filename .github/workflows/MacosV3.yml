@@ -1,4 +1,4 @@
-name: macOS-Remote 3
+name: macOS-Remote V3
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
           sudo createhomedir -c -u kaiden
           sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
 
-      - name: Enable Remote Management with Full Control
+      - name: Enable Remote Management
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
@@ -38,7 +38,7 @@ jobs:
             -allowAccessFor -allUsers \
             -restart -agent -menu
 
-      - name: Fix All TCC Permissions
+      - name: Fix TCC Permissions
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
@@ -63,24 +63,99 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
 
-      - name: Set Screen Resolution 1366x768
+      - name: Set Resolution 1920x1080
         run: |
-          # Install displayplacer
           brew install displayplacer
-          
-          # Show available resolutions
-          echo "Available resolutions:"
-          displayplacer list
-          
-          # Set resolution
-          displayplacer "id:1 res:1366x768 hz:60 color_depth:8 scaling:off origin:(0,0)" || \
-          displayplacer "id:1 res:1368x768 hz:60 color_depth:8" || \
-          displayplacer "id:1 res:1360x768 hz:60 color_depth:8" || \
-          echo "Custom resolution may not be supported, trying closest..."
-          
-          echo "Resolution configured!"
+          displayplacer "id:1 res:1920x1080 hz:60 color_depth:7"
 
-      - name: Restart Remote Services
+      - name: Optimize Network for Long Distance (USA → Morocco)
+        run: |
+          # Increase network buffer sizes
+          sudo sysctl -w net.inet.tcp.sendspace=2097152
+          sudo sysctl -w net.inet.tcp.recvspace=2097152
+          sudo sysctl -w net.inet.tcp.autorcvbufmax=4194304
+          sudo sysctl -w net.inet.tcp.autosndbufmax=4194304
+          
+          # Enable TCP optimizations
+          sudo sysctl -w net.inet.tcp.delayed_ack=0
+          sudo sysctl -w net.inet.tcp.mssdflt=1460
+          sudo sysctl -w net.inet.tcp.win_scale_factor=8
+          sudo sysctl -w net.inet.tcp.slowstart_flightsize=20
+          sudo sysctl -w net.inet.tcp.local_slowstart_flightsize=20
+          
+          # Disable Nagle's algorithm for lower latency
+          sudo sysctl -w net.inet.tcp.delayed_ack=0
+          
+          # Keep connections alive
+          sudo sysctl -w net.inet.tcp.keepidle=10000
+          sudo sysctl -w net.inet.tcp.keepintvl=5000
+          sudo sysctl -w net.inet.tcp.keepcnt=10
+          
+          # Increase maximum connections
+          sudo sysctl -w kern.ipc.somaxconn=2048
+          sudo sysctl -w kern.ipc.maxsockbuf=8388608
+          
+          echo "Network optimized for long distance!"
+
+      - name: Install High Performance VNC Server
+        run: |
+          # Install x11vnc for better performance options
+          brew install x11vnc
+          
+          # Install compression tools
+          brew install zstd lz4
+          
+          echo "VNC tools installed!"
+
+      - name: Start Optimized VNC Server
+        run: |
+          # Start x11vnc with maximum compression for long distance
+          x11vnc \
+            -display :0 \
+            -forever \
+            -shared \
+            -rfbport 5901 \
+            -passwd amaalik1 \
+            -noxdamage \
+            -nowf \
+            -ncache 10 \
+            -ncache_cr \
+            -threads \
+            -nap \
+            -wait 20 \
+            -defer 10 \
+            -compresslevel 9 \
+            -quality 7 \
+            -bg
+          
+          echo "Optimized VNC running on port 5901!"
+
+      - name: Install Brave Browser
+        run: |
+          echo "Installing Brave Browser..."
+          brew install --cask brave-browser
+          echo "Brave installed!"
+
+      - name: Install Firefox
+        run: |
+          echo "Installing Firefox..."
+          brew install --cask firefox
+          echo "Firefox installed!"
+
+      - name: Create Browser Shortcuts on Desktop
+        run: |
+          # Create desktop shortcuts for kaiden
+          sudo -u kaiden mkdir -p /Users/kaiden/Desktop
+          
+          # Brave shortcut
+          sudo -u kaiden ln -sf "/Applications/Brave Browser.app" "/Users/kaiden/Desktop/Brave Browser"
+          
+          # Firefox shortcut
+          sudo -u kaiden ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox"
+          
+          echo "Browser shortcuts created!"
+
+      - name: Restart Services
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -restart -agent -menu
@@ -118,20 +193,32 @@ jobs:
         run: |
           echo ""
           echo "============================================"
-          echo "        macOS VNC ACCESS READY              "
+          echo "   HIGH PERFORMANCE macOS VNC (Morocco)     "
           echo "============================================"
           echo ""
+          echo "FAST VNC (Optimized for long distance):"
+          echo "  Address:    $TAILSCALE_IP:5901"
+          echo "  Password:   amaalik1"
+          echo ""
+          echo "Standard VNC (Backup):"
           echo "  Address:    $TAILSCALE_IP:5900"
           echo "  Username:   kaiden"
           echo "  Password:   amaalik1"
-          echo "  Resolution: 1366x768"
+          echo ""
+          echo "Resolution:   1920x1080"
+          echo ""
+          echo "BROWSERS INSTALLED:"
+          echo "  - Brave Browser"
+          echo "  - Firefox"
           echo ""
           echo "============================================"
 
       - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date)] Active - VNC: $TAILSCALE_IP:5900"
+            echo "[$(date)] Active"
+            echo "  Fast VNC: $TAILSCALE_IP:5901"
+            echo "  Standard VNC: $TAILSCALE_IP:5900"
             caffeinate -u -t 60 &
             sleep 300
           done
