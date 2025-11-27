@@ -29,43 +29,13 @@ jobs:
           
           Restart-Service -Name TermService -Force
 
-      - name: Install Virtual Display Driver
-        run: |
-          # Download IddSampleDriver for custom refresh rates
-          $iddUrl = "https://github.com/ge9/IddSampleDriver/releases/download/0.0.1.4/IddSampleDriver.zip"
-          $iddPath = "$env:TEMP\IddSampleDriver.zip"
-          $iddExtract = "$env:TEMP\IddSampleDriver"
-          
-          try {
-            Invoke-WebRequest -Uri $iddUrl -OutFile $iddPath -ErrorAction Stop
-            Expand-Archive -Path $iddPath -DestinationPath $iddExtract -Force
-            
-            # Install driver
-            $infPath = Get-ChildItem -Path $iddExtract -Filter "*.inf" -Recurse | Select-Object -First 1
-            if ($infPath) {
-              pnputil /add-driver $infPath.FullName /install
-              Write-Host "Virtual Display Driver installed!"
-            }
-          } catch {
-            Write-Host "Virtual Display Driver install skipped: $_"
-          }
-
       - name: Configure Display (120Hz)
         run: |
           # Enable high refresh rate via registry
           $gfxPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'
           New-ItemProperty -Path $gfxPath -Name "HwSchMode" -Value 2 -PropertyType DWord -Force -ErrorAction SilentlyContinue
           
-          # Set monitor refresh rate
-          $monPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Video'
-          Get-ChildItem -Path $monPath -ErrorAction SilentlyContinue | ForEach-Object {
-            $subPath = Join-Path $_.PSPath "0000"
-            if (Test-Path $subPath) {
-              New-ItemProperty -Path $subPath -Name "DefaultSettings.VRefresh" -Value 120 -PropertyType DWord -Force -ErrorAction SilentlyContinue
-            }
-          }
-          
-          Write-Host "Display configured for 120Hz!"
+          Write-Host "Display configured!"
 
       - name: Optimize RDP for Maximum Performance (120 FPS)
         run: |
@@ -125,24 +95,17 @@ jobs:
         run: |
           reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
           
-          # Dark theme
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v AppsUseLightTheme /t REG_DWORD /d 0 /f
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 1 /f
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v ColorPrevalence /t REG_DWORD /d 1 /f
-          
-          # Dark background
           reg add "HKU\DefaultUser\Control Panel\Colors" /v Background /t REG_SZ /d "30 30 30" /f
-          
-          # Accent color
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v AccentColor /t REG_DWORD /d 0xff484a4c /f
-          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v ColorizationColor /t REG_DWORD /d 0xc44c4a48 /f
           
           [gc]::Collect()
           Start-Sleep -Seconds 2
           reg unload HKU\DefaultUser
           
-          # System-wide
           reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v AppsUseLightTheme /t REG_DWORD /d 0 /f
           reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
           
@@ -152,17 +115,12 @@ jobs:
         run: |
           reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
           
-          # Best appearance
           reg add "HKU\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 1 /f
-          
-          # Enable all effects
           reg add "HKU\DefaultUser\Control Panel\Desktop" /v SmoothScroll /t REG_DWORD /d 1 /f
           reg add "HKU\DefaultUser\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d "2" /f
           reg add "HKU\DefaultUser\Control Panel\Desktop" /v FontSmoothingType /t REG_DWORD /d 2 /f
           reg add "HKU\DefaultUser\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d "1" /f
           reg add "HKU\DefaultUser\Control Panel\Desktop" /v UserPreferencesMask /t REG_BINARY /d 9e3e078012000000 /f
-          
-          # Taskbar animations
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v TaskbarAnimations /t REG_DWORD /d 1 /f
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v DisablePreviewDesktop /t REG_DWORD /d 0 /f
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v EnableAeroPeek /t REG_DWORD /d 1 /f
@@ -178,7 +136,6 @@ jobs:
         run: |
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
           powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 bc5038f7-23e0-4960-96da-33abaf5935ec 100
-          powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 893dee8e-2bef-41e0-89c6-b55d0929964c 100
           powercfg /setactive SCHEME_CURRENT
 
       - name: Disable Password Complexity
@@ -199,16 +156,54 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-      - name: Install Chocolatey and Browsers
+      - name: Install Chocolatey
         run: |
           Set-ExecutionPolicy Bypass -Scope Process -Force
           [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
           iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          
+
+      - name: Install Browsers
+        run: |
           choco install brave -y
           choco install firefox -y
-          
           Write-Host "Browsers installed!"
+
+      - name: Install Parsec (240 FPS Gaming)
+        run: |
+          # Download Parsec
+          $parsecUrl = "https://builds.parsec.app/package/parsec-windows.exe"
+          $parsecPath = "$env:TEMP\parsec.exe"
+          
+          Invoke-WebRequest -Uri $parsecUrl -OutFile $parsecPath
+          
+          # Silent install
+          Start-Process -FilePath $parsecPath -ArgumentList "/silent", "/S" -Wait
+          
+          Write-Host "Parsec installed! (240 FPS support)"
+
+      - name: Configure Parsec for Headless Mode
+        run: |
+          # Create Parsec config directory
+          $parsecConfigDir = "C:\ProgramData\Parsec"
+          New-Item -Path $parsecConfigDir -ItemType Directory -Force | Out-Null
+          
+          # Configure Parsec for headless/virtual display
+          $parsecConfig = @"
+          app_host = 1
+          app_run_level = 3
+          encoder_bitrate = 50
+          encoder_fps = 240
+          encoder_min_bitrate = 10
+          encoder_quality = 4
+          network_server_start_port = 8000
+          server_admin_muted = 0
+          server_resolution_x = 1920
+          server_resolution_y = 1080
+          "@
+          
+          $parsecConfig | Out-File -FilePath "$parsecConfigDir\config.txt" -Encoding UTF8
+          
+          Write-Host "Parsec configured for 240 FPS!"
 
       - name: Restart RDP Service
         run: |
@@ -248,14 +243,18 @@ jobs:
           Write-Host "     Windows Server 2025 RDP READY          " -ForegroundColor Cyan
           Write-Host "============================================" -ForegroundColor Cyan
           Write-Host ""
+          Write-Host "RDP CONNECTION:" -ForegroundColor Yellow
           Write-Host "  Address:    $env:TAILSCALE_IP" -ForegroundColor Green
           Write-Host "  Username:   kaiden" -ForegroundColor Green
           Write-Host "  Password:   amaalik1" -ForegroundColor Green
+          Write-Host "  FPS:        120" -ForegroundColor Green
           Write-Host ""
-          Write-Host "  FPS:        120" -ForegroundColor Yellow
-          Write-Host "  Theme:      Dark" -ForegroundColor Yellow
-          Write-Host "  Animations: Enabled" -ForegroundColor Yellow
+          Write-Host "PARSEC (For Gaming - 240 FPS):" -ForegroundColor Yellow
+          Write-Host "  1. Login to Parsec on Windows" -ForegroundColor White
+          Write-Host "  2. Connect from your PC using Parsec app" -ForegroundColor White
           Write-Host ""
+          Write-Host "  Theme:      Dark" -ForegroundColor Green
+          Write-Host "  Animations: Enabled" -ForegroundColor Green
           Write-Host "  Browsers:   Brave, Firefox" -ForegroundColor Green
           Write-Host ""
           Write-Host "============================================" -ForegroundColor Cyan
