@@ -1,0 +1,311 @@
+name: Windows-RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: System Info
+        run: |
+          systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
+          wmic path win32_VideoController get name
+
+      - name: Configure RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-UDP" dir=in action=allow protocol=UDP localport=3389
+          
+          Restart-Service -Name TermService -Force
+
+      - name: Install Virtual Display Driver (For Hz/Refresh Rate)
+        run: |
+          # Download and install Parsec Virtual Display Driver
+          $vddUrl = "https://github.com/nomi-san/parsec-vdd/releases/download/v0.45/parsec-vdd-0.45.exe"
+          $vddPath = "$env:TEMP\parsec-vdd.exe"
+          
+          Invoke-WebRequest -Uri $vddUrl -OutFile $vddPath
+          Start-Process -FilePath $vddPath -ArgumentList "/S" -Wait -ErrorAction SilentlyContinue
+          
+          # Alternative: IddSampleDriver for custom resolutions
+          $iddUrl = "https://github.com/roshkins/IddSampleDriver/releases/download/0.0.1.3/IddSampleDriver.zip"
+          $iddPath = "$env:TEMP\IddSampleDriver.zip"
+          $iddExtract = "$env:TEMP\IddSampleDriver"
+          
+          Invoke-WebRequest -Uri $iddUrl -OutFile $iddPath -ErrorAction SilentlyContinue
+          Expand-Archive -Path $iddPath -DestinationPath $iddExtract -Force -ErrorAction SilentlyContinue
+          
+          # Install the driver
+          if (Test-Path "$iddExtract\IddSampleDriver\*.inf") {
+            pnputil /add-driver "$iddExtract\IddSampleDriver\*.inf" /install
+          }
+          
+          Write-Host "Virtual Display Driver installed!"
+
+      - name: Configure Virtual Display (1920x1080 @ 120Hz)
+        run: |
+          # Create virtual display configuration
+          $displayConfig = @"
+          {
+            "displays": [
+              {
+                "width": 1920,
+                "height": 1080,
+                "refreshRate": 120
+              }
+            ]
+          }
+          "@
+          
+          $configPath = "C:\ProgramData\ParsecVDD\displays.json"
+          New-Item -Path (Split-Path $configPath) -ItemType Directory -Force -ErrorAction SilentlyContinue
+          $displayConfig | Out-File -FilePath $configPath -Encoding UTF8 -ErrorAction SilentlyContinue
+          
+          # Set display refresh rate via registry
+          $monitorPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration'
+          New-Item -Path $monitorPath -Force -ErrorAction SilentlyContinue
+          
+          # Enable high refresh rate
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name "HwSchMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "Display configured for 120Hz!"
+
+      - name: Optimize RDP for Maximum Performance (120 FPS)
+        run: |
+          $tsPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+          $rdpTcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+          
+          # Create path if not exists
+          New-Item -Path $tsPath -Force -ErrorAction SilentlyContinue
+          
+          # Set 120 FPS (Maximum for RDP)
+          New-ItemProperty -Path $rdpTcpPath -Name "MaxFrameRate" -Value 120 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "MaxFrameRate" -Value 120 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $tsPath -Name "DWMFRAMEINTERVAL" -Value 8 -Type DWord -Force -ErrorAction SilentlyContinue
+          
+          # Enable UDP transport (faster)
+          New-ItemProperty -Path $tsPath -Name "SelectTransport" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Hardware acceleration
+          New-ItemProperty -Path $tsPath -Name "AVCHardwareEncodePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "AVC444ModePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "bEnumerateHWBeforeSW" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Enable RemoteFX (better graphics)
+          New-ItemProperty -Path $tsPath -Name "fEnableVirtualizedGraphics" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "fEnableRemoteFXAdvancedRemoteApp" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Disable throttling completely
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name "ThrottleEnabled" -Value 0 -Force -ErrorAction SilentlyContinue
+          
+          # Full color depth
+          New-ItemProperty -Path $rdpTcpPath -Name "ColorDepth" -Value 5 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Keep wallpaper and themes (DO NOT DISABLE)
+          New-ItemProperty -Path $tsPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "fAllowDesktopCompositionOnServer" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "RDP optimized for 120 FPS!"
+
+      - name: Optimize Network for Long Distance (USA to Morocco)
+        run: |
+          # TCP Optimizations
+          netsh interface tcp set global autotuninglevel=experimental
+          netsh interface tcp set global congestionprovider=ctcp
+          netsh interface tcp set global ecncapability=enabled
+          netsh interface tcp set global timestamps=enabled
+          netsh interface tcp set global rss=enabled
+          netsh interface tcp set global fastopen=enabled
+          netsh interface tcp set heuristics enabled
+          
+          # Increase buffer sizes
+          netsh interface tcp set global chimney=enabled 2>$null
+          
+          # Registry network optimizations
+          $tcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
+          New-ItemProperty -Path $tcpPath -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "TCPNoDelay" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "TcpDelAckTicks" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "GlobalMaxTcpWindowSize" -Value 65535 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "TcpWindowSize" -Value 65535 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "Tcp1323Opts" -Value 3 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "SackOpts" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "Network optimized for long distance!"
+
+      - name: Enable Dark Theme (Windows Server Fix)
+        run: |
+          # Load default user hive
+          reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
+          
+          # Dark theme for apps
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v AppsUseLightTheme /t REG_DWORD /d 0 /f
+          
+          # Dark theme for system
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
+          
+          # Keep transparency (looks nice)
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 1 /f
+          
+          # Enable color on title bars
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v ColorPrevalence /t REG_DWORD /d 1 /f
+          
+          # Set dark wallpaper color
+          reg add "HKU\DefaultUser\Control Panel\Colors" /v Background /t REG_SZ /d "30 30 30" /f
+          
+          # Set accent color (dark blue)
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v AccentColor /t REG_DWORD /d 0xff484a4c /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v ColorizationColor /t REG_DWORD /d 0xc44c4a48 /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v ColorizationAfterglow /t REG_DWORD /d 0xc44c4a48 /f
+          
+          # Unload hive
+          [gc]::Collect()
+          Start-Sleep -Seconds 2
+          reg unload HKU\DefaultUser
+          
+          # Also set for SYSTEM (affects login screen)
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v AppsUseLightTheme /t REG_DWORD /d 0 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
+          
+          Write-Host "Dark theme enabled!"
+
+      - name: Keep All Animations and Visual Effects
+        run: |
+          reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
+          
+          # Enable ALL visual effects (best appearance)
+          reg add "HKU\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 1 /f
+          
+          # Enable smooth scrolling
+          reg add "HKU\DefaultUser\Control Panel\Desktop" /v SmoothScroll /t REG_DWORD /d 1 /f
+          
+          # Enable font smoothing (ClearType)
+          reg add "HKU\DefaultUser\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d "2" /f
+          reg add "HKU\DefaultUser\Control Panel\Desktop" /v FontSmoothingType /t REG_DWORD /d 2 /f
+          
+          # Enable window animations
+          reg add "HKU\DefaultUser\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d "1" /f
+          
+          # Enable all UI effects
+          reg add "HKU\DefaultUser\Control Panel\Desktop" /v UserPreferencesMask /t REG_BINARY /d 9e3e078012000000 /f
+          
+          # Enable taskbar animations
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v TaskbarAnimations /t REG_DWORD /d 1 /f
+          
+          # Enable peek at desktop
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v DisablePreviewDesktop /t REG_DWORD /d 0 /f
+          
+          # Enable Aero Peek
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v EnableAeroPeek /t REG_DWORD /d 1 /f
+          
+          # Enable window shadow
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v ListviewShadow /t REG_DWORD /d 1 /f
+          
+          [gc]::Collect()
+          Start-Sleep -Seconds 2
+          reg unload HKU\DefaultUser
+          
+          Write-Host "All animations enabled!"
+
+      - name: Set High Performance Power Plan
+        run: |
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 bc5038f7-23e0-4960-96da-33abaf5935ec 100
+          powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 893dee8e-2bef-41e0-89c6-b55d0929964c 100
+          powercfg /setactive SCHEME_CURRENT
+
+      - name: Disable Password Complexity
+        run: |
+          secedit /export /cfg C:\secpol.cfg
+          (Get-Content C:\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
+          (Get-Content C:\secpol.cfg) -replace "MinimumPasswordLength = \d+", "MinimumPasswordLength = 1" | Set-Content C:\secpol.cfg
+          secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+          Remove-Item C:\secpol.cfg -Force
+
+      - name: Create RDP User
+        run: |
+          $username = "kaiden"
+          $password = "amaalik1"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+
+      - name: Install Chocolatey
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+      - name: Install Browsers
+        run: |
+          choco install brave -y
+          choco install firefox -y
+          Write-Host "Browsers installed!"
+
+      - name: Restart RDP Service
+        run: |
+          Restart-Service -Name TermService -Force
+          Start-Sleep -Seconds 3
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Connect Tailscale
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=windows-rdp-$env:GITHUB_RUN_ID
+          
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned"
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Display Connection Info
+        run: |
+          Write-Host ""
+          Write-Host "============================================" -ForegroundColor Cyan
+          Write-Host "        Windows RDP READY                   " -ForegroundColor Cyan
+          Write-Host "============================================" -ForegroundColor Cyan
+          Write-Host ""
+          Write-Host "  Address:    $env:TAILSCALE_IP" -ForegroundColor Green
+          Write-Host "  Username:   kaiden" -ForegroundColor Green
+          Write-Host "  Password:   amaalik1" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "  FPS:        120" -ForegroundColor Yellow
+          Write-Host "  Theme:      Dark" -ForegroundColor Yellow
+          Write-Host "  Animations: Enabled" -ForegroundColor Yellow
+          Write-Host "  Refresh:    120Hz" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "  Browsers:   Brave, Firefox" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "============================================" -ForegroundColor Cyan
+
+      - name: Keep Alive
+        run: |
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active: $env:TAILSCALE_IP"
+              Start-Sleep -Seconds 300
+          }
