@@ -81,133 +81,28 @@ jobs:
         run: |
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
 
-      - name: Disable Password Complexity
+      - name: Disable UAC
         run: |
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Value 0 -Force
+
+      - name: Create Admin User Kaiden
+        run: |
+          # Disable password complexity
           secedit /export /cfg C:\secpol.cfg
           (Get-Content C:\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
           (Get-Content C:\secpol.cfg) -replace "MinimumPasswordLength = \d+", "MinimumPasswordLength = 1" | Set-Content C:\secpol.cfg
           secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
           Remove-Item C:\secpol.cfg -Force
-
-      - name: Disable UAC Completely
-        run: |
-          # Disable UAC via registry
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0 -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 0 -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Value 0 -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "PromptOnSecureDesktop" -Value 0 -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "FilterAdministratorToken" -Value 0 -Force
-          
-          Write-Host "UAC disabled!"
-
-      - name: Enable Built-in Administrator Account
-        run: |
-          # Enable the built-in Administrator account (has FULL access)
-          net user Administrator amaalik1 /active:yes
-          
-          # Add to all admin groups
-          net localgroup Administrators Administrator /add 2>$null
-          
-          Write-Host "Built-in Administrator enabled with password: amaalik1"
-
-      - name: Create Kaiden as Full Admin
-        run: |
-          $username = "kaiden"
-          $password = "amaalik1"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
           # Create user
-          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          $securePass = ConvertTo-SecureString "@kaiden" -AsPlainText -Force
+          New-LocalUser -Name "kaiden" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
           
-          # Add to ALL admin groups
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-          
-          # Add to additional groups for full access
-          net localgroup "Backup Operators" $username /add 2>$null
-          net localgroup "Power Users" $username /add 2>$null
-          net localgroup "Network Configuration Operators" $username /add 2>$null
-          net localgroup "Performance Monitor Users" $username /add 2>$null
-          net localgroup "Remote Management Users" $username /add 2>$null
-          
-          Write-Host "Kaiden created with full admin rights!"
-
-      - name: Grant Full Disk Access
-        run: |
-          # Take ownership of all drives
-          $drives = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root
-          
-          foreach ($drive in $drives) {
-            Write-Host "Granting access to $drive"
-            
-            # Take ownership
-            takeown /F "$drive" /R /A /D Y 2>$null
-            
-            # Grant full access to Administrators
-            icacls "$drive" /grant Administrators:F /T /C /Q 2>$null
-            
-            # Grant full access to kaiden
-            icacls "$drive" /grant kaiden:F /T /C /Q 2>$null
-          }
-          
-          Write-Host "Full disk access granted!"
-
-      - name: Grant Access to System Folders
-        run: |
-          # Grant access to commonly restricted folders
-          $folders = @(
-            "C:\Windows\System32\config",
-            "C:\System Volume Information",
-            "C:\ProgramData",
-            "C:\Users",
-            "C:\Recovery"
-          )
-          
-          foreach ($folder in $folders) {
-            if (Test-Path $folder) {
-              takeown /F $folder /R /A /D Y 2>$null
-              icacls $folder /grant Administrators:F /T /C /Q 2>$null
-              icacls $folder /grant kaiden:F /T /C /Q 2>$null
-            }
-          }
-          
-          Write-Host "System folder access granted!"
-
-      - name: Disable Windows Defender Restrictions
-        run: |
-          # Disable Controlled Folder Access (blocks app access to folders)
-          Set-MpPreference -EnableControlledFolderAccess Disabled -ErrorAction SilentlyContinue
-          
-          # Add exclusions for all drives
-          $drives = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root
-          foreach ($drive in $drives) {
-            Add-MpPreference -ExclusionPath $drive -ErrorAction SilentlyContinue
-          }
-          
-          Write-Host "Defender restrictions disabled!"
-
-      - name: Configure Admin Auto-Elevation
-        run: |
-          # Run everything as admin without prompts
-          reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
-          
-          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Associations" /v ModRiskFileTypes /t REG_SZ /d ".exe;.bat;.cmd;.ps1;.vbs;.msi" /f
-          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" /v "C:\Windows\System32\cmd.exe" /t REG_SZ /d "RUNASADMIN" /f
-          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" /v "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" /t REG_SZ /d "RUNASADMIN" /f
-          
-          [gc]::Collect()
-          Start-Sleep -Seconds 2
-          reg unload HKU\DefaultUser
-          
-          Write-Host "Auto-elevation configured!"
-
-      - name: Allow RDP for Administrator
-        run: |
-          # Allow built-in Administrator to RDP
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
-          
-          # Disable blank password restriction
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LimitBlankPasswordUse" -Value 0 -Force
+          # Add to Administrators group
+          Add-LocalGroupMember -Group "Administrators" -Member "kaiden"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "kaiden"
 
       - name: Restart RDP Service
         run: |
@@ -247,19 +142,13 @@ jobs:
           Write-Host "        Windows Server 2025 RDP             " -ForegroundColor Cyan
           Write-Host "============================================" -ForegroundColor Cyan
           Write-Host ""
-          Write-Host "FULL ADMIN ACCOUNT:" -ForegroundColor Yellow
           Write-Host "  Address:    $env:TAILSCALE_IP" -ForegroundColor Green
-          Write-Host "  Username:   Administrator" -ForegroundColor Green
-          Write-Host "  Password:   amaalik1" -ForegroundColor Green
-          Write-Host ""
-          Write-Host "OR USE:" -ForegroundColor Yellow
           Write-Host "  Username:   kaiden" -ForegroundColor Green
-          Write-Host "  Password:   amaalik1" -ForegroundColor Green
+          Write-Host "  Password:   @kaiden" -ForegroundColor Green
           Write-Host ""
           Write-Host "  FPS:        120" -ForegroundColor Yellow
           Write-Host "  Theme:      Glow (Dark)" -ForegroundColor Yellow
-          Write-Host "  UAC:        Disabled" -ForegroundColor Yellow
-          Write-Host "  Access:     FULL (All drives)" -ForegroundColor Yellow
+          Write-Host "  Access:     Admin (Full)" -ForegroundColor Yellow
           Write-Host ""
           Write-Host "============================================" -ForegroundColor Cyan
 
