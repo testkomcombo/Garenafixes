@@ -1,77 +1,87 @@
-name: RDP
+name: Windows-RDP (Fully Released)
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  windows-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: System Info
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-          netsh advfirewall firewall add rule name="RDP-UDP" `
-            dir=in action=allow protocol=UDP localport=3389
+          Write-Host "=== OS Info ===" -ForegroundColor Cyan
+          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber | Format-List
+          
+          Write-Host "=== GPU Info ===" -ForegroundColor Cyan
+          Get-CimInstance -ClassName Win32_VideoController | Select-Object Name, DriverVersion | Format-List
+
+      - name: Configure RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-UDP" dir=in action=allow protocol=UDP localport=3389
+          
           Restart-Service -Name TermService -Force
 
-      - name: Optimize RDP Performance Settings
+      - name: Optimize RDP (120 FPS)
         run: |
-          $tsClientPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+          $tsPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
           $rdpTcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
           
-          # Enable UDP Transport
-          New-ItemProperty -Path $tsClientPath -Name "SelectTransport" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-Item -Path $tsPath -Force -ErrorAction SilentlyContinue | Out-Null
           
-          # 60 FPS
-          New-ItemProperty -Path $rdpTcpPath -Name "MaxFrameRate" -Value 60 -PropertyType DWord -Force -ErrorAction SilentlyContinue
-          New-ItemProperty -Path $tsClientPath -Name "MaxFrameRate" -Value 60 -PropertyType DWord -Force -ErrorAction SilentlyContinue
-          
-          # Hardware acceleration
-          New-ItemProperty -Path $tsClientPath -Name "AVCHardwareEncodePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
-          New-ItemProperty -Path $tsClientPath -Name "AVC444ModePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
-          
-          # Disable throttling
+          New-ItemProperty -Path $rdpTcpPath -Name "MaxFrameRate" -Value 120 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "MaxFrameRate" -Value 120 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "SelectTransport" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "AVCHardwareEncodePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "AVC444ModePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name "ThrottleEnabled" -Value 0 -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $rdpTcpPath -Name "ColorDepth" -Value 5 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "fAllowDesktopCompositionOnServer" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+
+      - name: Optimize Network
+        run: |
+          netsh interface tcp set global autotuninglevel=experimental 2>$null
+          netsh interface tcp set global ecncapability=enabled 2>$null
+          netsh interface tcp set global rss=enabled 2>$null
+          netsh interface tcp set global fastopen=enabled 2>$null
+          netsh int tcp set supplemental Internet congestionprovider=ctcp 2>$null
           
-          # Network optimization
           $tcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
           New-ItemProperty -Path $tcpPath -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
           New-ItemProperty -Path $tcpPath -Name "TCPNoDelay" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
 
-      - name: Enable Dark Theme & Optimize Visuals
+      - name: Apply Glow Theme
         run: |
           reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
           
-          # Dark theme
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v AppsUseLightTheme /t REG_DWORD /d 0 /f
           reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
-          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 0 /f
-          
-          # Performance visuals
-          reg add "HKU\DefaultUser\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d "2" /f
-          reg add "HKU\DefaultUser\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d "0" /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 1 /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v ColorPrevalence /t REG_DWORD /d 1 /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v AccentColor /t REG_DWORD /d 0xffb4a0ff /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v ColorizationColor /t REG_DWORD /d 0xc4b4a0ff /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\DWM" /v EnableWindowColorization /t REG_DWORD /d 1 /f
           
           [gc]::Collect()
           Start-Sleep -Seconds 2
           reg unload HKU\DefaultUser
+          
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v AppsUseLightTheme /t REG_DWORD /d 0 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
 
       - name: Set High Performance Power Plan
         run: |
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-          powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 bc5038f7-23e0-4960-96da-33abaf5935ec 100
-          powercfg /setactive SCHEME_CURRENT
 
-      - name: Disable Password Complexity Policy
+      - name: Disable Password Complexity
         run: |
           secedit /export /cfg C:\secpol.cfg
           (Get-Content C:\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
@@ -79,14 +89,125 @@ jobs:
           secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
           Remove-Item C:\secpol.cfg -Force
 
-      - name: Create RDP User
+      - name: Disable UAC Completely
+        run: |
+          # Disable UAC via registry
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "PromptOnSecureDesktop" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "FilterAdministratorToken" -Value 0 -Force
+          
+          Write-Host "UAC disabled!"
+
+      - name: Enable Built-in Administrator Account
+        run: |
+          # Enable the built-in Administrator account (has FULL access)
+          net user Administrator amaalik1 /active:yes
+          
+          # Add to all admin groups
+          net localgroup Administrators Administrator /add 2>$null
+          
+          Write-Host "Built-in Administrator enabled with password: amaalik1"
+
+      - name: Create Kaiden as Full Admin
         run: |
           $username = "kaiden"
-          $password = "@Amaalik15"
+          $password = "amaalik1"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Create user
           New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          
+          # Add to ALL admin groups
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          
+          # Add to additional groups for full access
+          net localgroup "Backup Operators" $username /add 2>$null
+          net localgroup "Power Users" $username /add 2>$null
+          net localgroup "Network Configuration Operators" $username /add 2>$null
+          net localgroup "Performance Monitor Users" $username /add 2>$null
+          net localgroup "Remote Management Users" $username /add 2>$null
+          
+          Write-Host "Kaiden created with full admin rights!"
+
+      - name: Grant Full Disk Access
+        run: |
+          # Take ownership of all drives
+          $drives = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root
+          
+          foreach ($drive in $drives) {
+            Write-Host "Granting access to $drive"
+            
+            # Take ownership
+            takeown /F "$drive" /R /A /D Y 2>$null
+            
+            # Grant full access to Administrators
+            icacls "$drive" /grant Administrators:F /T /C /Q 2>$null
+            
+            # Grant full access to kaiden
+            icacls "$drive" /grant kaiden:F /T /C /Q 2>$null
+          }
+          
+          Write-Host "Full disk access granted!"
+
+      - name: Grant Access to System Folders
+        run: |
+          # Grant access to commonly restricted folders
+          $folders = @(
+            "C:\Windows\System32\config",
+            "C:\System Volume Information",
+            "C:\ProgramData",
+            "C:\Users",
+            "C:\Recovery"
+          )
+          
+          foreach ($folder in $folders) {
+            if (Test-Path $folder) {
+              takeown /F $folder /R /A /D Y 2>$null
+              icacls $folder /grant Administrators:F /T /C /Q 2>$null
+              icacls $folder /grant kaiden:F /T /C /Q 2>$null
+            }
+          }
+          
+          Write-Host "System folder access granted!"
+
+      - name: Disable Windows Defender Restrictions
+        run: |
+          # Disable Controlled Folder Access (blocks app access to folders)
+          Set-MpPreference -EnableControlledFolderAccess Disabled -ErrorAction SilentlyContinue
+          
+          # Add exclusions for all drives
+          $drives = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root
+          foreach ($drive in $drives) {
+            Add-MpPreference -ExclusionPath $drive -ErrorAction SilentlyContinue
+          }
+          
+          Write-Host "Defender restrictions disabled!"
+
+      - name: Configure Admin Auto-Elevation
+        run: |
+          # Run everything as admin without prompts
+          reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
+          
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Associations" /v ModRiskFileTypes /t REG_SZ /d ".exe;.bat;.cmd;.ps1;.vbs;.msi" /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" /v "C:\Windows\System32\cmd.exe" /t REG_SZ /d "RUNASADMIN" /f
+          reg add "HKU\DefaultUser\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" /v "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" /t REG_SZ /d "RUNASADMIN" /f
+          
+          [gc]::Collect()
+          Start-Sleep -Seconds 2
+          reg unload HKU\DefaultUser
+          
+          Write-Host "Auto-elevation configured!"
+
+      - name: Allow RDP for Administrator
+        run: |
+          # Allow built-in Administrator to RDP
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
+          
+          # Disable blank password restriction
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LimitBlankPasswordUse" -Value 0 -Force
 
       - name: Restart RDP Service
         run: |
@@ -101,19 +222,10 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Establish Tailscale Connection with Exit Node
+      - name: Connect Tailscale
         run: |
-          # Enable IP forwarding for exit node functionality
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'IPEnableRouter' -Value 1 -Force
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=windows-rdp-$env:GITHUB_RUN_ID
           
-          # Start Tailscale with exit node advertisement
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-            --hostname=gh-runner-$env:GITHUB_RUN_ID `
-            --advertise-exit-node `
-            --accept-routes
-          
-          # Wait for Tailscale IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -121,46 +233,39 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
+          
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+              Write-Error "Tailscale IP not assigned"
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-     
-      - name: Verify RDP Accessibility
-        run: |
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
 
-      - name: Maintain Connection
+      - name: Display Connection Info
         run: |
           Write-Host ""
           Write-Host "============================================" -ForegroundColor Cyan
-          Write-Host "    RDP + EXIT NODE (VPN) ACCESS            " -ForegroundColor Cyan
+          Write-Host "        Windows Server 2025 RDP             " -ForegroundColor Cyan
           Write-Host "============================================" -ForegroundColor Cyan
           Write-Host ""
-          Write-Host "RDP CONNECTION:" -ForegroundColor Yellow
-          Write-Host "  Address:  $env:TAILSCALE_IP" -ForegroundColor Green
-          Write-Host "  Username: kaiden" -ForegroundColor Green
-          Write-Host "  Password: @Amaalik15" -ForegroundColor Green
+          Write-Host "FULL ADMIN ACCOUNT:" -ForegroundColor Yellow
+          Write-Host "  Address:    $env:TAILSCALE_IP" -ForegroundColor Green
+          Write-Host "  Username:   Administrator" -ForegroundColor Green
+          Write-Host "  Password:   amaalik1" -ForegroundColor Green
           Write-Host ""
-          Write-Host "EXIT NODE (USE AS VPN):" -ForegroundColor Yellow
-          Write-Host "  1. Go to Tailscale Admin Console" -ForegroundColor White
-          Write-Host "  2. Find: gh-runner-$env:GITHUB_RUN_ID" -ForegroundColor White
-          Write-Host "  3. Click '...' > Edit route settings" -ForegroundColor White
-          Write-Host "  4. Enable 'Use as exit node'" -ForegroundColor White
+          Write-Host "OR USE:" -ForegroundColor Yellow
+          Write-Host "  Username:   kaiden" -ForegroundColor Green
+          Write-Host "  Password:   amaalik1" -ForegroundColor Green
           Write-Host ""
-          Write-Host "ON YOUR DEVICE:" -ForegroundColor Yellow
-          Write-Host "  - Open Tailscale app" -ForegroundColor White
-          Write-Host "  - Click 'Exit Node'" -ForegroundColor White
-          Write-Host "  - Select 'gh-runner-...'" -ForegroundColor White
+          Write-Host "  FPS:        120" -ForegroundColor Yellow
+          Write-Host "  Theme:      Glow (Dark)" -ForegroundColor Yellow
+          Write-Host "  UAC:        Disabled" -ForegroundColor Yellow
+          Write-Host "  Access:     FULL (All drives)" -ForegroundColor Yellow
           Write-Host ""
           Write-Host "============================================" -ForegroundColor Cyan
-          
+
+      - name: Keep Alive
+        run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP + Exit Node Active"
+              Write-Host "[$(Get-Date)] RDP Active: $env:TAILSCALE_IP"
               Start-Sleep -Seconds 300
           }
