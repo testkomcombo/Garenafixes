@@ -29,34 +29,71 @@ jobs:
           
           Restart-Service -Name TermService -Force
 
-      - name: Optimize RDP (120 FPS)
+      - name: Optimize RDP for Maximum Performance
         run: |
           $tsPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
           $rdpTcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
           
           New-Item -Path $tsPath -Force -ErrorAction SilentlyContinue | Out-Null
           
+          # 120 FPS
           New-ItemProperty -Path $rdpTcpPath -Name "MaxFrameRate" -Value 120 -PropertyType DWord -Force -ErrorAction SilentlyContinue
           New-ItemProperty -Path $tsPath -Name "MaxFrameRate" -Value 120 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $tsPath -Name "DWMFRAMEINTERVAL" -Value 8 -Type DWord -Force -ErrorAction SilentlyContinue
+          
+          # Enable UDP transport (faster)
           New-ItemProperty -Path $tsPath -Name "SelectTransport" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Hardware acceleration
           New-ItemProperty -Path $tsPath -Name "AVCHardwareEncodePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
           New-ItemProperty -Path $tsPath -Name "AVC444ModePreferred" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "bEnumerateHWBeforeSW" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # RemoteFX
+          New-ItemProperty -Path $tsPath -Name "fEnableVirtualizedGraphics" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tsPath -Name "fEnableRemoteFXAdvancedRemoteApp" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Disable throttling
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name "ThrottleEnabled" -Value 0 -Force -ErrorAction SilentlyContinue
+          
+          # Full color depth
           New-ItemProperty -Path $rdpTcpPath -Name "ColorDepth" -Value 5 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Keep wallpaper and themes
           New-ItemProperty -Path $tsPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
           New-ItemProperty -Path $tsPath -Name "fAllowDesktopCompositionOnServer" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "RDP optimized for 120 FPS!"
 
-      - name: Optimize Network
+      - name: Optimize Network for Long Distance (Morocco)
         run: |
+          # TCP optimizations
           netsh interface tcp set global autotuninglevel=experimental 2>$null
           netsh interface tcp set global ecncapability=enabled 2>$null
+          netsh interface tcp set global timestamps=enabled 2>$null
           netsh interface tcp set global rss=enabled 2>$null
           netsh interface tcp set global fastopen=enabled 2>$null
+          netsh interface tcp set heuristics enabled 2>$null
           netsh int tcp set supplemental Internet congestionprovider=ctcp 2>$null
           
+          # Registry TCP optimizations
           $tcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
           New-ItemProperty -Path $tcpPath -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
           New-ItemProperty -Path $tcpPath -Name "TCPNoDelay" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "TcpDelAckTicks" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "GlobalMaxTcpWindowSize" -Value 65535 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "TcpWindowSize" -Value 65535 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "Tcp1323Opts" -Value 3 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path $tcpPath -Name "SackOpts" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          
+          # Disable Nagle's Algorithm (reduces latency)
+          $intPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces'
+          Get-ChildItem $intPath | ForEach-Object {
+            New-ItemProperty -Path $_.PSPath -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+            New-ItemProperty -Path $_.PSPath -Name "TCPNoDelay" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+          }
+          
+          Write-Host "Network optimized!"
 
       - name: Apply Glow Theme
         run: |
@@ -79,7 +116,17 @@ jobs:
 
       - name: Set High Performance Power Plan
         run: |
+          # Set to High Performance
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          
+          # Set CPU to 100%
+          powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 bc5038f7-23e0-4960-96da-33abaf5935ec 100
+          powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 893dee8e-2bef-41e0-89c6-b55d0929964c 100
+          
+          # Disable sleep
+          powercfg /setacvalueindex SCHEME_CURRENT 238c9fa8-0aad-41ed-83f4-97be242c8f20 29f6c1db-86da-48c5-9fdb-f2b67b1f44da 0
+          
+          powercfg /setactive SCHEME_CURRENT
 
       - name: Disable UAC
         run: |
@@ -87,20 +134,34 @@ jobs:
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 0 -Force
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Value 0 -Force
 
+      - name: Disable Unnecessary Services (Speed Up)
+        run: |
+          # Disable services that slow down RDP
+          $servicesToDisable = @(
+            "DiagTrack",           # Telemetry
+            "SysMain",             # Superfetch
+            "WSearch",             # Windows Search
+            "Spooler"              # Print Spooler
+          )
+          
+          foreach ($service in $servicesToDisable) {
+            Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+          }
+          
+          Write-Host "Unnecessary services disabled!"
+
       - name: Create Admin User Kaiden
         run: |
-          # Disable password complexity
           secedit /export /cfg C:\secpol.cfg
           (Get-Content C:\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
           (Get-Content C:\secpol.cfg) -replace "MinimumPasswordLength = \d+", "MinimumPasswordLength = 1" | Set-Content C:\secpol.cfg
           secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
           Remove-Item C:\secpol.cfg -Force
           
-          # Create user
           $securePass = ConvertTo-SecureString "@kaiden" -AsPlainText -Force
           New-LocalUser -Name "kaiden" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
           
-          # Add to Administrators group
           Add-LocalGroupMember -Group "Administrators" -Member "kaiden"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "kaiden"
 
@@ -139,7 +200,7 @@ jobs:
         run: |
           Write-Host ""
           Write-Host "============================================" -ForegroundColor Cyan
-          Write-Host "        Windows Server 2025 RDP             " -ForegroundColor Cyan
+          Write-Host "     Windows Server 2025 RDP (FAST)         " -ForegroundColor Cyan
           Write-Host "============================================" -ForegroundColor Cyan
           Write-Host ""
           Write-Host "  Address:    $env:TAILSCALE_IP" -ForegroundColor Green
@@ -149,6 +210,13 @@ jobs:
           Write-Host "  FPS:        120" -ForegroundColor Yellow
           Write-Host "  Theme:      Glow (Dark)" -ForegroundColor Yellow
           Write-Host "  Access:     Admin (Full)" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "  Optimizations:" -ForegroundColor Yellow
+          Write-Host "    - UDP transport enabled" -ForegroundColor White
+          Write-Host "    - Hardware acceleration" -ForegroundColor White
+          Write-Host "    - Throttling disabled" -ForegroundColor White
+          Write-Host "    - TCP latency optimized" -ForegroundColor White
+          Write-Host "    - Unnecessary services disabled" -ForegroundColor White
           Write-Host ""
           Write-Host "============================================" -ForegroundColor Cyan
 
