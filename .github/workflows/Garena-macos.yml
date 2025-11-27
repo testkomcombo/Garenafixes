@@ -1,4 +1,4 @@
-name: Garena macOS
+name: Garena Macos
 
 on:
   workflow_dispatch:
@@ -63,25 +63,39 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
 
-      - name: Find and Set Best Resolution
+      - name: Set Resolution 1920x1080
         run: |
           brew install displayplacer
-          
-          echo "=== Available Resolutions ==="
-          displayplacer list
-          echo ""
-          
-          # Try resolutions in order (best 16:9 first)
-          for res in "1920x1080" "1600x900" "1366x768" "1360x768" "1280x720" "1680x1050" "1440x900" "1280x800"; do
-            if displayplacer "id:1 res:$res" 2>/dev/null; then
-              echo "SUCCESS: Set resolution to $res"
-              echo "RESOLUTION=$res" >> $GITHUB_ENV
-              exit 0
-            fi
-          done
-          
-          echo "RESOLUTION=default" >> $GITHUB_ENV
-          echo "Using default resolution"
+          displayplacer "id:1 res:1920x1080 hz:60 color_depth:7"
+
+      - name: Optimize Network for Long Distance
+        run: |
+          sudo sysctl -w net.inet.tcp.sendspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.recvspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.autorcvbufmax=4194304 || true
+          sudo sysctl -w net.inet.tcp.autosndbufmax=4194304 || true
+          sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
+          sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
+          sudo sysctl -w net.inet.tcp.win_scale_factor=8 || true
+          sudo sysctl -w net.inet.tcp.keepidle=10000 || true
+          sudo sysctl -w net.inet.tcp.keepintvl=5000 || true
+          sudo sysctl -w net.inet.tcp.keepcnt=10 || true
+          sudo sysctl -w kern.ipc.somaxconn=2048 || true
+          echo "Network optimized!"
+
+      - name: Install Brave Browser
+        run: |
+          brew install --cask brave-browser
+
+      - name: Install Firefox
+        run: |
+          brew install --cask firefox
+
+      - name: Create Browser Shortcuts
+        run: |
+          sudo -u kaiden mkdir -p /Users/kaiden/Desktop
+          sudo -u kaiden ln -sf "/Applications/Brave Browser.app" "/Users/kaiden/Desktop/Brave Browser" || true
+          sudo -u kaiden ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox" || true
 
       - name: Restart Services
         run: |
@@ -121,20 +135,21 @@ jobs:
         run: |
           echo ""
           echo "============================================"
-          echo "        macOS VNC ACCESS READY              "
+          echo "        macOS VNC READY                     "
           echo "============================================"
           echo ""
           echo "  Address:    $TAILSCALE_IP:5900"
-          echo "  Username:   kaiden"
           echo "  Password:   amaalik1"
-          echo "  Resolution: $RESOLUTION"
+          echo "  Resolution: 1920x1080"
+          echo ""
+          echo "  Browsers:   Brave, Firefox"
           echo ""
           echo "============================================"
 
       - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date)] Active - VNC: $TAILSCALE_IP:5900"
+            echo "[$(date)] VNC: $TAILSCALE_IP:5900"
             caffeinate -u -t 60 &
             sleep 300
           done
