@@ -1,0 +1,211 @@
+name: macOS-Remote fix 2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Get macOS Version
+        run: sw_vers
+
+      - name: Create User Account
+        run: |
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "amaalik1"
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo createhomedir -c -u kaiden
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+
+      - name: Enable Remote Management with Full Control
+        run: |
+          # Full activation with all privileges
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -clientopts -setmenuextra -menuextra no \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw amaalik1 \
+            -clientopts -setreqperm -reqperm no \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+
+      - name: Fix TCC Permissions (Mouse/Keyboard Fix)
+        run: |
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          # Show current schema for debugging
+          echo "=== TCC Database Schema ==="
+          sudo sqlite3 "$TCC_DB" ".schema access" 2>/dev/null || true
+          
+          # Screen Capture
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceScreenCapture';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop',0,2,4,1);" 2>/dev/null || true
+          
+          # PostEvent (Mouse/Keyboard Input)
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServicePostEvent';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.RemoteDesktop',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent',1,2,4,1);" 2>/dev/null || true
+          
+          # Accessibility (Full Control)
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceAccessibility';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.RemoteDesktop',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent',1,2,4,1);" 2>/dev/null || true
+          
+          # ListenEvent (Input Monitoring)
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceListenEvent';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          
+          echo "TCC permissions set!"
+
+      - name: Disable SIP-related Restrictions
+        run: |
+          # Disable Gatekeeper
+          sudo spctl --master-disable 2>/dev/null || true
+          
+          # Allow apps from anywhere
+          sudo defaults write /Library/Preferences/com.apple.security GKAutoRearm -bool false 2>/dev/null || true
+
+      - name: Configure Screen Sharing Settings
+        run: |
+          # Enable screen sharing
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement LoadRemoteManagementMenuExtra -bool false
+          
+          # Disable screen lock
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword -bool false
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPasswordDelay -int 0
+
+      - name: Set Resolution 1920x1080
+        run: |
+          brew install displayplacer
+          displayplacer "id:1 res:1920x1080 hz:60 color_depth:7"
+
+      - name: Optimize Network
+        run: |
+          sudo sysctl -w net.inet.tcp.sendspace=4194304 || true
+          sudo sysctl -w net.inet.tcp.recvspace=4194304 || true
+          sudo sysctl -w net.inet.tcp.autorcvbufmax=8388608 || true
+          sudo sysctl -w net.inet.tcp.autosndbufmax=8388608 || true
+          sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
+          sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
+          sudo sysctl -w kern.ipc.somaxconn=4096 || true
+          sudo sysctl -w net.inet.tcp.keepidle=10000 || true
+          sudo sysctl -w net.inet.tcp.keepintvl=5000 || true
+          sudo sysctl -w net.inet.tcp.win_scale_factor=8 || true
+
+      - name: Create Firefox Shortcut
+        run: |
+          if [ ! -d "/Applications/Firefox.app" ]; then
+            brew install --cask firefox
+          fi
+          
+          sudo mkdir -p /Users/kaiden/Desktop
+          sudo ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox"
+          sudo chown -R kaiden:staff /Users/kaiden/Desktop
+
+      - name: Restart Remote Management (Apply Permissions)
+        run: |
+          # Stop ARD Agent
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -stop
+          
+          sleep 2
+          
+          # Restart with full privileges
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+          
+          sleep 3
+          
+          echo "Remote Management restarted!"
+
+      - name: Verify VNC Port
+        run: |
+          echo "Checking VNC port 5900..."
+          lsof -i :5900 || echo "Port check done"
+          
+          echo ""
+          echo "Checking ARD Agent..."
+          ps aux | grep -i ard | grep -v grep || true
+
+      - name: Install Tailscale
+        run: brew install tailscale
+
+      - name: Start Tailscale Daemon
+        run: |
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tailscaled.log 2>&1 &
+          
+          sleep 8
+
+      - name: Connect Tailscale
+        run: |
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=macos-runner-${{ github.run_id }}
+          
+          sleep 5
+          
+          TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Display Connection Info
+        run: |
+          echo ""
+          echo "============================================"
+          echo "        macOS VNC READY                     "
+          echo "============================================"
+          echo ""
+          echo "  Address:    $TAILSCALE_IP:5900"
+          echo "  Username:   kaiden"
+          echo "  Password:   amaalik1"
+          echo "  Resolution: 1920x1080"
+          echo ""
+          echo "  Mouse/Keyboard: ENABLED"
+          echo ""
+          echo "============================================"
+          echo "  CONNECT FROM ARCH:"
+          echo "============================================"
+          echo ""
+          echo "  vncviewer -FullScreen=1 $TAILSCALE_IP:5900"
+          echo ""
+          echo "============================================"
+
+      - name: Keep Alive
+        run: |
+          while true; do
+            echo "[$(date)] VNC: $TAILSCALE_IP:5900"
+            caffeinate -u -t 60 &
+            sleep 300
+          done
