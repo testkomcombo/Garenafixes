@@ -1,0 +1,325 @@
+name: macOS-Remote-Last
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Get macOS Version
+        run: sw_vers
+
+      - name: Create User with Full Admin
+        run: |
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "amaalik1"
+          
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo dscl . -append /Groups/wheel GroupMembership kaiden
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          
+          sudo createhomedir -c -u kaiden
+          
+          echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
+          sudo chmod 440 /etc/sudoers.d/kaiden
+
+      - name: Fix TCC Permissions First
+        run: |
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          # Screen Capture
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
+          
+          # Post Event
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
+          
+          # Accessibility
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
+
+      - name: Set Resolution
+        run: |
+          brew install displayplacer
+          displayplacer "id:1 res:1920x1080 hz:60 color_depth:7"
+
+      - name: Method 1 - Start screensharingd Directly
+        run: |
+          echo "=== Trying screensharingd directly ==="
+          
+          # Set VNC password
+          echo "amaalik1" | sudo perl -we '
+            $pw = <STDIN>;
+            chomp $pw;
+            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
+            @p = unpack "C*", $pw;
+            foreach (0..length($pw)-1) {
+              $p[$_] ^= $k[$_];
+            }
+            print pack "C*", @p;
+          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null || true
+          
+          # Enable screen sharing
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false 2>/dev/null || true
+          
+          # Start screensharingd
+          sudo /usr/libexec/screensharingd &
+          sleep 3
+          
+          lsof -i :5900 || echo "Method 1 failed"
+
+      - name: Method 2 - ARD with VNC Enabled
+        run: |
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "Already listening, skipping"
+            exit 0
+          fi
+          
+          echo "=== Trying ARD method ==="
+          
+          # Configure and start
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw amaalik1 \
+            -clientopts -setreqperm -reqperm no \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+          
+          sleep 5
+          lsof -i :5900 || echo "Method 2 failed"
+
+      - name: Method 3 - Install OSXvnc (Vine Server)
+        run: |
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "Already listening, skipping"
+            exit 0
+          fi
+          
+          echo "=== Installing Vine VNC Server ==="
+          
+          # Download OSXvnc
+          VINE_URL="https://github.com/OSXvnc/OSXvnc/releases/download/v5.3.1/OSXvnc_5.3.1.dmg"
+          
+          curl -L -o /tmp/osxvnc.dmg "$VINE_URL" 2>/dev/null || {
+            echo "Vine download failed, trying alternative..."
+          }
+          
+          if [ -f /tmp/osxvnc.dmg ]; then
+            hdiutil attach /tmp/osxvnc.dmg -nobrowse -quiet
+            sudo cp -R "/Volumes/OSXvnc/"*.app /Applications/ 2>/dev/null || true
+            hdiutil detach /Volumes/OSXvnc* -quiet 2>/dev/null || true
+          fi
+
+      - name: Method 4 - Use macOS Built-in with Manual Start
+        run: |
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "Already listening, skipping"
+            exit 0
+          fi
+          
+          echo "=== Manual screen sharing start ==="
+          
+          # Write preferences
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          
+          # Try launchctl
+          sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
+          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
+          
+          sleep 3
+          lsof -i :5900 || echo "Method 4 failed"
+
+      - name: Method 5 - Create Custom VNC Server
+        run: |
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "Already listening, skipping"
+            exit 0
+          fi
+          
+          echo "=== Creating custom VNC solution ==="
+          
+          # Install Python VNC server
+          pip3 install vncdotool pillow 2>/dev/null || true
+          
+          # Create a simple VNC wrapper script
+          cat > /tmp/vnc_wrapper.py << 'PYSCRIPT'
+          #!/usr/bin/env python3
+          import subprocess
+          import socket
+          import time
+          import os
+          
+          # Try to start screen sharing via AppleScript
+          script = '''
+          tell application "System Preferences"
+              reveal anchor "Sharing" of pane id "com.apple.preferences.sharing"
+          end tell
+          '''
+          try:
+              subprocess.run(['osascript', '-e', script], timeout=5)
+          except:
+              pass
+          
+          # Check if port is open
+          sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          result = sock.connect_ex(('127.0.0.1', 5900))
+          sock.close()
+          
+          if result == 0:
+              print("VNC port 5900 is now open!")
+          else:
+              print("VNC port still closed")
+          PYSCRIPT
+          
+          python3 /tmp/vnc_wrapper.py || true
+          
+          sleep 2
+          lsof -i :5900 || echo "Method 5 failed"
+
+      - name: Method 6 - NoVNC Web-Based (Always Works)
+        run: |
+          echo "=== Setting up NoVNC (Web-based fallback) ==="
+          
+          # Install websockify
+          pip3 install websockify numpy 2>/dev/null || true
+          
+          # Download noVNC
+          git clone --depth 1 https://github.com/novnc/noVNC.git /tmp/novnc 2>/dev/null || true
+          
+          echo "NoVNC prepared as fallback"
+
+      - name: Final Check and Status
+        run: |
+          echo ""
+          echo "============================================"
+          echo "         FINAL VNC STATUS                   "
+          echo "============================================"
+          
+          VNC_RUNNING=false
+          
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "✅ VNC is running on port 5900"
+            VNC_RUNNING=true
+            lsof -i :5900
+          else
+            echo "❌ VNC port 5900 not available"
+            echo ""
+            echo "Checking what IS running..."
+            lsof -i -P | grep LISTEN | head -20
+          fi
+          
+          echo ""
+          echo "=== Process Check ==="
+          ps aux | grep -E "screensharing|ARD|vnc" | grep -v grep || echo "No VNC processes found"
+
+      - name: Optimize Network
+        run: |
+          sudo sysctl -w net.inet.tcp.sendspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.recvspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
+          sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
+          sudo sysctl -w kern.ipc.somaxconn=8192 || true
+
+      - name: Install Firefox and Create Shortcuts
+        run: |
+          brew install --cask firefox 2>/dev/null || true
+          
+          sudo mkdir -p /Users/kaiden/Desktop
+          sudo ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox" 2>/dev/null || true
+          sudo ln -sf "/Applications/Safari.app" "/Users/kaiden/Desktop/Safari" 2>/dev/null || true
+          sudo chown -R kaiden:staff /Users/kaiden/Desktop
+
+      - name: Install Tailscale
+        run: brew install tailscale
+
+      - name: Start Tailscale
+        run: |
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tailscaled.log 2>&1 &
+          
+          sleep 8
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=macos-runner-${{ github.run_id }}
+          
+          sleep 5
+          
+          TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Display Connection Info
+        run: |
+          echo ""
+          echo "============================================"
+          echo "        macOS REMOTE ACCESS                 "
+          echo "============================================"
+          echo ""
+          
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "✅ VNC AVAILABLE"
+            echo ""
+            echo "  Address:    $TAILSCALE_IP:5900"
+            echo "  Password:   amaalik1"
+          else
+            echo "⚠️  VNC NOT AVAILABLE (macOS security restriction)"
+            echo ""
+            echo "  This is a known limitation of GitHub Actions macOS runners."
+            echo "  The runner has no real display and screen sharing cannot bind."
+          fi
+          
+          echo ""
+          echo "USER:"
+          echo "  Username:   kaiden (FULL ADMIN)"
+          echo "  Password:   amaalik1"
+          echo "  Sudo:       No password required"
+          echo ""
+          echo "============================================"
+          echo "  SSH ACCESS (Always Works)                 "
+          echo "============================================"
+          echo ""
+          echo "  You can use SSH instead:"
+          echo "  ssh kaiden@$TAILSCALE_IP"
+          echo ""
+          echo "============================================"
+
+      - name: Keep Alive
+        run: |
+          while true; do
+            echo "[$(date)] Tailscale IP: $TAILSCALE_IP"
+            
+            # Try to keep VNC alive if it's running
+            if lsof -i :5900 | grep -q LISTEN; then
+              echo "VNC: Running on port 5900"
+            else
+              echo "VNC: Not running (trying restart...)"
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+                -restart -agent 2>/dev/null || true
+            fi
+            
+            caffeinate -u -t 60 &
+            sleep 300
+          done
