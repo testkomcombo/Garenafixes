@@ -1,0 +1,306 @@
+name: macOS-Remote-Ultra-Max
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Get macOS Version
+        run: sw_vers
+
+      - name: Create User with Full Admin
+        run: |
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "amaalik1"
+          
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo dscl . -append /Groups/wheel GroupMembership kaiden
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          
+          sudo createhomedir -c -u kaiden
+          
+          echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
+          sudo chmod 440 /etc/sudoers.d/kaiden
+
+      - name: Enable Screen Sharing Service (Fix Port 5900)
+        run: |
+          # Method 1: Load Screen Sharing LaunchDaemon
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          
+          # Method 2: Enable via kickstart
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -clientopts -setmenuextra -menuextra no \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw amaalik1 \
+            -clientopts -setreqperm -reqperm no \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+          
+          sleep 3
+          
+          # Method 3: Start Screen Sharing directly
+          sudo launchctl start com.apple.screensharing 2>/dev/null || true
+          
+          # Method 4: Enable via defaults
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false 2>/dev/null || true
+          
+          sleep 2
+
+      - name: Force Start VNC on Port 5900
+        run: |
+          # Check if already listening
+          if ! lsof -i :5900 | grep -q LISTEN; then
+            echo "Port 5900 not listening, trying alternative methods..."
+            
+            # Try to restart the service
+            sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+            sleep 1
+            sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+            sleep 2
+            
+            # Restart ARD Agent
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+              -restart -agent
+            
+            sleep 3
+          fi
+          
+          # Final check
+          echo "=== Port 5900 Check ==="
+          lsof -i :5900 || echo "Still not listening, will try VNC wrapper"
+
+      - name: Install and Start VNC Server (Backup Method)
+        run: |
+          # If native screen sharing fails, use a VNC wrapper
+          if ! lsof -i :5900 | grep -q LISTEN; then
+            echo "Native screen sharing failed, installing x11vnc as backup..."
+            
+            brew install x11vnc 2>/dev/null || true
+            
+            # Start x11vnc in background
+            x11vnc -display :0 -forever -shared -rfbport 5900 -passwd amaalik1 -bg 2>/dev/null || true
+            
+            sleep 2
+          fi
+
+      - name: Verify VNC is Running
+        run: |
+          echo "=== Verifying VNC ==="
+          
+          # Check port
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "✅ Port 5900 is LISTENING"
+            lsof -i :5900
+          else
+            echo "❌ Port 5900 still not listening"
+            echo "Trying one more restart..."
+            
+            # Final attempt
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+              -deactivate -stop
+            sleep 2
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+              -activate \
+              -configure \
+              -access -on \
+              -privs -all \
+              -clientopts -setvnclegacy -vnclegacy yes \
+              -clientopts -setvncpw -vncpw amaalik1 \
+              -allowAccessFor -allUsers \
+              -restart -agent -menu
+            
+            sleep 5
+            lsof -i :5900
+          fi
+
+      - name: Fix TCC Permissions
+        run: |
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceScreenCapture';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServicePostEvent';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceAccessibility';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceListenEvent';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+
+      - name: Configure Screen Sharing
+        run: |
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCFullColor -bool true
+
+      - name: Set Resolution 1920x1080
+        run: |
+          brew install displayplacer
+          displayplacer "id:1 res:1920x1080 hz:60 color_depth:7"
+
+      - name: Keep Wallpaper and Animations
+        run: |
+          # Set wallpaper
+          WALLPAPER=$(find /System/Library/Desktop\ Pictures -name "*.heic" 2>/dev/null | head -1)
+          if [ -n "$WALLPAPER" ]; then
+            sudo -u kaiden osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$WALLPAPER\"" 2>/dev/null || true
+          fi
+          
+          # Ensure animations are NOT disabled
+          sudo -u kaiden defaults delete NSGlobalDomain NSAutomaticWindowAnimationsEnabled 2>/dev/null || true
+          sudo -u kaiden defaults delete com.apple.dock autohide-time-modifier 2>/dev/null || true
+          sudo -u kaiden defaults delete com.apple.finder DisableAllAnimations 2>/dev/null || true
+
+      - name: Optimize Network
+        run: |
+          sudo sysctl -w net.inet.tcp.sendspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.recvspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.autorcvbufmax=16777216 || true
+          sudo sysctl -w net.inet.tcp.autosndbufmax=16777216 || true
+          sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
+          sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
+          sudo sysctl -w net.inet.tcp.win_scale_factor=10 || true
+          sudo sysctl -w net.inet.tcp.keepidle=5000 || true
+          sudo sysctl -w net.inet.tcp.keepintvl=2500 || true
+          sudo sysctl -w net.inet.tcp.keepcnt=3 || true
+          sudo sysctl -w kern.ipc.somaxconn=8192 || true
+
+      - name: Install Firefox
+        run: |
+          if [ ! -d "/Applications/Firefox.app" ]; then
+            brew install --cask firefox
+          fi
+
+      - name: Create Desktop Shortcuts
+        run: |
+          sudo mkdir -p /Users/kaiden/Desktop
+          sudo ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox"
+          sudo ln -sf "/Applications/Safari.app" "/Users/kaiden/Desktop/Safari"
+          sudo ln -sf "/System/Applications/Utilities/Terminal.app" "/Users/kaiden/Desktop/Terminal"
+          sudo chown -R kaiden:staff /Users/kaiden/Desktop
+
+      - name: Final VNC Restart
+        run: |
+          # One final restart to apply all settings
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent -menu
+          
+          sleep 5
+          
+          echo "=== Final Port Check ==="
+          lsof -i :5900 || echo "Port 5900 status"
+
+      - name: Install Tailscale
+        run: brew install tailscale
+
+      - name: Start Tailscale Daemon
+        run: |
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tailscaled.log 2>&1 &
+          
+          sleep 8
+
+      - name: Connect Tailscale
+        run: |
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=macos-runner-${{ github.run_id }}
+          
+          sleep 5
+          
+          TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Final Status Check
+        run: |
+          echo ""
+          echo "============================================"
+          echo "         FINAL STATUS CHECK                 "
+          echo "============================================"
+          echo ""
+          
+          echo "=== Port 5900 ==="
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "✅ VNC is RUNNING on port 5900"
+            lsof -i :5900 | head -5
+          else
+            echo "❌ VNC NOT running on port 5900"
+            echo ""
+            echo "Attempting emergency start..."
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+              -activate -restart -agent
+            sleep 3
+            lsof -i :5900
+          fi
+          
+          echo ""
+          echo "=== ARD Agent ==="
+          pgrep -l ARDAgent || echo "ARDAgent not found"
+          
+          echo ""
+          echo "=== Screen Sharing ==="
+          pgrep -l screensharing || echo "screensharing not found"
+
+      - name: Display Connection Info
+        run: |
+          echo ""
+          echo "============================================"
+          echo "        macOS VNC READY                     "
+          echo "============================================"
+          echo ""
+          echo "  Address:    $TAILSCALE_IP:5900"
+          echo "  Password:   amaalik1"
+          echo "  Resolution: 1920x1080"
+          echo ""
+          echo "  User:       kaiden (FULL ADMIN)"
+          echo "  Sudo:       No password required"
+          echo ""
+          echo "============================================"
+          echo "  KRDC CONNECTION:                          "
+          echo "============================================"
+          echo ""
+          echo "  vnc://$TAILSCALE_IP:5900"
+          echo ""
+          echo "============================================"
+
+      - name: Keep Alive
+        run: |
+          while true; do
+            echo "[$(date)] VNC: $TAILSCALE_IP:5900"
+            
+            # Check if VNC is still running
+            if ! lsof -i :5900 | grep -q LISTEN; then
+              echo "WARNING: VNC stopped, restarting..."
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+                -restart -agent
+            fi
+            
+            caffeinate -u -t 60 &
+            sleep 300
+          done
