@@ -1,0 +1,269 @@
+name: macOS-Remote-GPT
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Get macOS Version
+        run: sw_vers
+
+      - name: Create User with Full Admin
+        run: |
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "amaalik1"
+          
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo dscl . -append /Groups/wheel GroupMembership kaiden
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          
+          sudo createhomedir -c -u kaiden
+          
+          echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
+          sudo chmod 440 /etc/sudoers.d/kaiden
+
+      - name: Fix TCC Permissions First
+        run: |
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          # Screen Capture
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
+          
+          # Post Event
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
+          
+          # Accessibility
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
+
+      - name: Set Resolution
+        run: |
+          brew install displayplacer
+          echo "=== displayplacer list ==="
+          displayplacer list || true
+
+          # Auto-detect a display id from displayplacer list output.
+          # Tries common formats:
+          #   "Persistent screen id: <id>"
+          #   "id:<id>"
+          DISPLAY_ID="$(
+            displayplacer list 2>/dev/null | awk -F': ' '/Persistent screen id:/ {print $2; exit}'
+          )"
+
+          if [ -z "$DISPLAY_ID" ]; then
+            DISPLAY_ID="$(
+              displayplacer list 2>/dev/null | grep -m1 -Eo 'id:[^ ]+' | head -n1 | cut -d':' -f2
+            )"
+          fi
+
+          if [ -n "$DISPLAY_ID" ]; then
+            echo "Detected display id: $DISPLAY_ID"
+            echo "Setting resolution to 1280x720 @ 60Hz (color_depth:7)"
+            displayplacer "id:${DISPLAY_ID} res:1280x720 hz:60 color_depth:7" || {
+              echo "displayplacer failed to apply settings; continuing without hard-failing."
+              true
+            }
+          else
+            echo "Could not detect display id via displayplacer; skipping resolution change."
+          fi
+
+      - name: Enable ARD with VNC Enabled
+        run: |
+          echo "=== Enabling Apple Remote Desktop (ARD) + VNC (single method) ==="
+          
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw amaalik1 \
+            -clientopts -setreqperm -reqperm no \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu || true
+          
+          sleep 5
+          echo "=== Port check (5900) ==="
+          lsof -nP -iTCP:5900 -sTCP:LISTEN || echo "VNC is not listening on 5900 (may be restricted on GitHub runners)."
+
+      - name: Install NoMachine (NX) and Start Server
+        run: |
+          brew install --cask nomachine
+          
+          echo "=== Starting NoMachine server ==="
+          sudo /usr/NX/bin/nxserver --startup || true
+          
+          sleep 3
+          echo "=== Port check (4000) ==="
+          lsof -nP -iTCP:4000 -sTCP:LISTEN || echo "NoMachine is not listening on 4000."
+
+      - name: Final Check and Status
+        run: |
+          echo ""
+          echo "============================================"
+          echo "         FINAL REMOTE GUI STATUS            "
+          echo "============================================"
+          echo ""
+          
+          NX_RUNNING=false
+          VNC_RUNNING=false
+          
+          if lsof -nP -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
+            echo "✅ NoMachine (NX) is running on port 4000"
+            NX_RUNNING=true
+            lsof -nP -iTCP:4000 -sTCP:LISTEN || true
+          else
+            echo "❌ NoMachine (NX) port 4000 not available"
+          fi
+          
+          echo ""
+          
+          if lsof -nP -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
+            echo "✅ VNC is running on port 5900"
+            VNC_RUNNING=true
+            lsof -nP -iTCP:5900 -sTCP:LISTEN || true
+          else
+            echo "❌ VNC port 5900 not available"
+          fi
+          
+          echo ""
+          echo "=== Listener Snapshot (top 30) ==="
+          lsof -nP -iTCP -sTCP:LISTEN | head -30 || true
+          
+          echo ""
+          echo "=== Process Check (ARD / screensharing / NX) ==="
+          ps aux | grep -E "ARDAgent|RemoteManagement|screensharing|nx(server|node|service)|NoMachine" | grep -v grep || echo "No matching processes found"
+
+      - name: Optimize Network
+        run: |
+          sudo sysctl -w net.inet.tcp.sendspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.recvspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
+          sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
+          sudo sysctl -w kern.ipc.somaxconn=8192 || true
+
+      - name: Install Firefox and Create Shortcuts
+        run: |
+          brew install --cask firefox 2>/dev/null || true
+          
+          sudo mkdir -p /Users/kaiden/Desktop
+          sudo ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox" 2>/dev/null || true
+          sudo ln -sf "/Applications/Safari.app" "/Users/kaiden/Desktop/Safari" 2>/dev/null || true
+          sudo chown -R kaiden:staff /Users/kaiden/Desktop
+
+      - name: Install Tailscale
+        run: brew install tailscale
+
+      - name: Start Tailscale
+        run: |
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tailscaled.log 2>&1 &
+          
+          sleep 8
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=macos-runner-${{ github.run_id }}
+          
+          sleep 5
+          
+          TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Tailscale Diagnostics (netcheck)
+        run: |
+          echo "=== tailscale netcheck ==="
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock netcheck || true
+
+      - name: Display Connection Info
+        run: |
+          echo ""
+          echo "============================================"
+          echo "        macOS REMOTE ACCESS                 "
+          echo "============================================"
+          echo ""
+          
+          echo "✅ RECOMMENDED (FAST): NoMachine (NX)"
+          if lsof -nP -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
+            echo ""
+            echo "  Address:    $TAILSCALE_IP:4000"
+            echo "  Username:   kaiden"
+            echo "  Password:   amaalik1"
+          else
+            echo ""
+            echo "  ⚠️  NoMachine is not currently listening on port 4000."
+          fi
+          
+          echo ""
+          echo "--------------------------------------------"
+          echo "Fallback: VNC"
+          if lsof -nP -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
+            echo ""
+            echo "  Address:    $TAILSCALE_IP:5900"
+            echo "  Password:   amaalik1"
+          else
+            echo ""
+            echo "  ⚠️  VNC NOT AVAILABLE (macOS security restriction)"
+            echo ""
+            echo "  This is a known limitation of GitHub Actions macOS runners."
+            echo "  The runner has no real display and screen sharing cannot bind."
+          fi
+          
+          echo ""
+          echo "USER:"
+          echo "  Username:   kaiden (FULL ADMIN)"
+          echo "  Password:   amaalik1"
+          echo "  Sudo:       No password required"
+          echo ""
+          echo "============================================"
+          echo "  SSH ACCESS (Always Works)                 "
+          echo "============================================"
+          echo ""
+          echo "  ssh kaiden@$TAILSCALE_IP"
+          echo ""
+          echo "============================================"
+
+      - name: Keep Alive
+        run: |
+          while true; do
+            echo "[$(date)] Tailscale IP: $TAILSCALE_IP"
+            
+            # Keep NoMachine alive
+            if lsof -nP -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
+              echo "NoMachine: Running on port 4000"
+            else
+              echo "NoMachine: Not running (trying startup...)"
+              sudo /usr/NX/bin/nxserver --startup 2>/dev/null || true
+            fi
+            
+            # Keep VNC alive (fallback)
+            if lsof -nP -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
+              echo "VNC: Running on port 5900"
+            else
+              echo "VNC: Not running (trying ARD agent restart...)"
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+                -restart -agent 2>/dev/null || true
+            fi
+            
+            caffeinate -u -t 60 &
+            sleep 300
+          done
