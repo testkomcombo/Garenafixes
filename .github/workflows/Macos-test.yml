@@ -25,103 +25,68 @@ jobs:
           sudo dscl . -append /Groups/admin GroupMembership kaiden
           sudo dscl . -append /Groups/wheel GroupMembership kaiden
           sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          sudo dscl . -append /Groups/com.apple.access_ssh GroupMembership kaiden
           
           sudo createhomedir -c -u kaiden
           
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           sudo chmod 440 /etc/sudoers.d/kaiden
 
+      - name: Enable SSH Password Authentication
+        run: |
+          echo "=== Enabling SSH with password auth ==="
+          
+          sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+          
+          sudo sed -i '' 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i '' 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i '' 's/^#KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i '' 's/^KbdInteractiveAuthentication no/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+          
+          echo "PasswordAuthentication yes" | sudo tee -a /etc/ssh/sshd_config
+          echo "KbdInteractiveAuthentication yes" | sudo tee -a /etc/ssh/sshd_config
+          
+          sudo systemsetup -setremotelogin on 2>/dev/null || true
+          sudo launchctl stop com.openssh.sshd 2>/dev/null || true
+          sudo launchctl start com.openssh.sshd 2>/dev/null || true
+          
+          sleep 2
+          echo "SSH configured"
+
       - name: Fix TCC Permissions
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          # Screen Capture for all relevant apps
+          for app in com.nomachine.nxnode com.nomachine.nxserver com.nomachine.nxd; do
+            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','$app',0,2,4,1);" 2>/dev/null || true
+            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','$app',0,2,4,1);" 2>/dev/null || true
+            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','$app',0,2,4,1);" 2>/dev/null || true
+          done
+          
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.nomachine.nxnode',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.nomachine.nxserver',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.nomachine.nxd',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.nomachine.nxplayer',0,2,4,1);" 2>/dev/null || true
-          
-          # Post Event
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.nomachine.nxnode',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.nomachine.nxserver',0,2,4,1);" 2>/dev/null || true
-          
-          # Accessibility
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.nomachine.nxnode',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.nomachine.nxserver',0,2,4,1);" 2>/dev/null || true
-          
-          # ListenEvent
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.nomachine.nxnode',0,2,4,1);" 2>/dev/null || true
 
       - name: Set Resolution
         run: |
           brew install displayplacer
-          
-          DISPLAY_ID=$(displayplacer list 2>/dev/null | grep -E "^Persistent screen id:" | head -1 | sed 's/Persistent screen id: //')
-          
+          DISPLAY_ID=$(displayplacer list 2>/dev/null | grep "^Persistent screen id:" | head -1 | sed 's/Persistent screen id: //')
           if [ -n "$DISPLAY_ID" ]; then
-            echo "Detected display ID: $DISPLAY_ID"
             displayplacer "id:$DISPLAY_ID res:1280x720 hz:60 color_depth:7" || true
-          else
-            displayplacer "id:1 res:1280x720 hz:60 color_depth:7" 2>/dev/null || true
           fi
-          
           displayplacer list 2>/dev/null | head -10
 
-      - name: Enable Auto-Login and Create Desktop Session
+      - name: Activate Desktop
         run: |
-          echo "=== Setting up auto-login for kaiden ==="
-          
-          # Enable auto-login
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
-          
-          # Create kcpassword file for auto-login
-          # This is a simple XOR encoding macOS uses
-          sudo python3 << 'PYTHON'
-          import struct
-          password = "amaalik1"
-          key = [0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F]
-          encoded = []
-          for i, c in enumerate(password + '\0'):
-              encoded.append(ord(c) ^ key[i % len(key)])
-          # Pad to multiple of 12
-          while len(encoded) % 12 != 0:
-              encoded.append(key[len(encoded) % len(key)])
-          with open('/etc/kcpassword', 'wb') as f:
-              f.write(bytes(encoded))
-          PYTHON
-          sudo chmod 600 /etc/kcpassword
-          
-          echo "=== Activating GUI session for runner user ==="
-          
-          # The runner user already has a session, let's ensure it's active
-          # Start some GUI processes to ensure the desktop is alive
-          
-          # Wake up the display
           caffeinate -u -t 5 &
-          
-          # Open Finder to create a desktop session
-          sudo -u runner open -a Finder 2>/dev/null || true
+          open -a Finder
           sleep 2
-          
-          # Ensure WindowServer knows about our display
-          sudo -u runner /System/Library/CoreServices/Menu\ Extras/TextInput.menu/Contents/SharedSupport/TIS.prefPane/Contents/Resources/KeyboardViewer.app/Contents/MacOS/KeyboardViewer &>/dev/null &
-          sleep 1
-          killall KeyboardViewer 2>/dev/null || true
-          
-          echo "=== Checking GUI session ==="
-          # Check if WindowServer is running
-          pgrep -x WindowServer && echo "WindowServer is running" || echo "WindowServer not found"
-          
-          # List GUI sessions
-          who -q 2>/dev/null || true
+          echo "Desktop activated"
+          pgrep -x Finder && echo "Finder running"
+          pgrep -x Dock && echo "Dock running"
 
-      - name: Start ARD (Fallback)
+      - name: Start ARD
         run: |
-          echo "=== Configuring Apple Remote Desktop ==="
+          echo "=== Configuring ARD ==="
           
-          # Set VNC password
           echo "amaalik1" | sudo perl -we '
             $pw = <STDIN>;
             chomp $pw;
@@ -132,20 +97,15 @@ jobs:
           ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null || true
           
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
-          
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
           
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure \
-            -access -on \
-            -privs -all \
+            -activate -configure -access -on -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw amaalik1 \
             -clientopts -setreqperm -reqperm no \
-            -allowAccessFor -allUsers \
-            -restart -agent -menu
+            -allowAccessFor -allUsers -restart -agent -menu
           
           sleep 2
 
@@ -160,88 +120,31 @@ jobs:
           
           NX_CFG="/Applications/NoMachine.app/Contents/Frameworks/etc"
           
-          echo "=== Stopping NoMachine to configure ==="
           sudo "$NXSERVER" --shutdown 2>/dev/null || true
           sleep 2
           
-          echo "=== Configuring NoMachine server.cfg ==="
           if [ -f "$NX_CFG/server.cfg" ]; then
             sudo cp "$NX_CFG/server.cfg" "$NX_CFG/server.cfg.bak"
-            
-            # Enable NX protocol
             sudo sed -i '' 's/^#NXPort 4000/NXPort 4000/' "$NX_CFG/server.cfg"
             sudo sed -i '' 's/^#NXTCPPort 4000/NXTCPPort 4000/' "$NX_CFG/server.cfg"
-            sudo sed -i '' 's/^#NXUDPPort 4000/NXUDPPort 4000/' "$NX_CFG/server.cfg"
             sudo sed -i '' 's/^#AcceptedAuthenticationMethods .*/AcceptedAuthenticationMethods all/' "$NX_CFG/server.cfg"
-            sudo sed -i '' 's/^#EnableClipboard .*/EnableClipboard both/' "$NX_CFG/server.cfg"
-            
-            # Physical desktop mode settings
             sudo sed -i '' 's/^#PhysicalDesktopAuthorization .*/PhysicalDesktopAuthorization 0/' "$NX_CFG/server.cfg"
-            sudo sed -i '' 's/^#AutomaticDisconnection .*/AutomaticDisconnection 0/' "$NX_CFG/server.cfg"
-            
-            # Add settings if not present
             grep -q "^NXPort" "$NX_CFG/server.cfg" || echo "NXPort 4000" | sudo tee -a "$NX_CFG/server.cfg"
-            grep -q "^NXTCPPort" "$NX_CFG/server.cfg" || echo "NXTCPPort 4000" | sudo tee -a "$NX_CFG/server.cfg"
             grep -q "^AcceptedAuthenticationMethods" "$NX_CFG/server.cfg" || echo "AcceptedAuthenticationMethods all" | sudo tee -a "$NX_CFG/server.cfg"
             grep -q "^PhysicalDesktopAuthorization" "$NX_CFG/server.cfg" || echo "PhysicalDesktopAuthorization 0" | sudo tee -a "$NX_CFG/server.cfg"
-            
-            echo "Server config NX settings:"
-            grep -E "^NX|^Physical|^Accepted" "$NX_CFG/server.cfg" | head -10
           fi
           
-          echo "=== Configuring NoMachine node.cfg ==="
           if [ -f "$NX_CFG/node.cfg" ]; then
             sudo cp "$NX_CFG/node.cfg" "$NX_CFG/node.cfg.bak"
-            
-            # Binding
-            sudo sed -i '' 's/^#NodeBind .*/NodeBind 0.0.0.0/' "$NX_CFG/node.cfg"
-            sudo sed -i '' 's/^#DisplayServerBind .*/DisplayServerBind 0.0.0.0/' "$NX_CFG/node.cfg"
-            
-            # Desktop settings - enable physical desktop access
             sudo sed -i '' 's/^#CreateDisplay .*/CreateDisplay 1/' "$NX_CFG/node.cfg"
-            sudo sed -i '' 's/^#DisplayOwner .*/DisplayOwner runner/' "$NX_CFG/node.cfg"
             sudo sed -i '' 's/^#PhysicalDesktop .*/PhysicalDesktop 1/' "$NX_CFG/node.cfg"
-            
-            # Add if not present
-            grep -q "^NodeBind" "$NX_CFG/node.cfg" || echo "NodeBind 0.0.0.0" | sudo tee -a "$NX_CFG/node.cfg"
-            grep -q "^DisplayServerBind" "$NX_CFG/node.cfg" || echo "DisplayServerBind 0.0.0.0" | sudo tee -a "$NX_CFG/node.cfg"
             grep -q "^CreateDisplay" "$NX_CFG/node.cfg" || echo "CreateDisplay 1" | sudo tee -a "$NX_CFG/node.cfg"
             grep -q "^PhysicalDesktop" "$NX_CFG/node.cfg" || echo "PhysicalDesktop 1" | sudo tee -a "$NX_CFG/node.cfg"
-            
-            echo "Node config settings:"
-            grep -E "^Node|^Display|^Physical|^Create" "$NX_CFG/node.cfg" | head -10
           fi
           
-          echo "=== Starting NoMachine ==="
           sudo "$NXSERVER" --startup
           sleep 5
-          
-          echo "=== NoMachine Status ==="
           sudo "$NXSERVER" --status || true
-
-      - name: Activate Desktop Session
-        run: |
-          echo "=== Ensuring desktop is active ==="
-          
-          # Wake display
-          caffeinate -u -t 3 &
-          
-          # Force screen update by moving mouse (simulated)
-          osascript -e 'tell application "System Events" to key code 63' 2>/dev/null || true
-          
-          # Open Finder to ensure desktop is drawn
-          open -a Finder
-          sleep 2
-          
-          # Take a screenshot to force screen rendering
-          screencapture -x /tmp/desktop_check.png 2>/dev/null && echo "Screenshot captured successfully" || echo "Screenshot failed (expected on headless)"
-          
-          # Check if we can get screen info
-          echo "=== Screen info ==="
-          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
-          
-          echo "=== Running GUI processes ==="
-          ps aux | grep -E "Finder|Dock|WindowServer|SystemUIServer" | grep -v grep | head -10
 
       - name: Optimize Network
         run: |
@@ -251,10 +154,9 @@ jobs:
           sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
           sudo sysctl -w kern.ipc.somaxconn=8192 || true
 
-      - name: Install Firefox and Create Shortcuts
+      - name: Install Firefox
         run: |
           brew install --cask firefox 2>/dev/null || true
-          
           sudo mkdir -p /Users/kaiden/Desktop
           sudo ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox" 2>/dev/null || true
           sudo ln -sf "/Applications/Safari.app" "/Users/kaiden/Desktop/Safari" 2>/dev/null || true
@@ -291,145 +193,88 @@ jobs:
 
       - name: Final Status
         run: |
-          echo ""
           echo "============================================"
-          echo "       REMOTE ACCESS STATUS                 "
+          echo "       REMOTE ACCESS STATUS"
           echo "============================================"
-          echo ""
           echo "Tailscale IP: $TAILSCALE_IP"
           echo ""
-          
-          echo "=== NoMachine ==="
-          NX_PID=$(pgrep -x nxserver 2>/dev/null || echo "")
-          if [ -n "$NX_PID" ]; then
-            echo "[OK] NoMachine server running (PID: $NX_PID)"
-          else
-            echo "[WARN] NoMachine not running"
-          fi
-          
-          if lsof -iTCP:4000 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-            echo "[OK] NX Protocol on port 4000"
-          else
-            echo "[INFO] NX using SSH tunnel (port 22)"
-          fi
-          
+          echo "=== Services ==="
+          pgrep -x nxserver > /dev/null && echo "[OK] NoMachine running" || echo "[WARN] NoMachine not running"
+          lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN && echo "[OK] ARD on 3283" || echo "[INFO] ARD not listening"
+          lsof -iTCP:22 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN && echo "[OK] SSH on 22" || echo "[INFO] SSH via launchd"
+          pgrep -x Finder > /dev/null && echo "[OK] Desktop active" || echo "[WARN] No desktop"
           echo ""
-          echo "=== ARD ==="
-          if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-            echo "[OK] ARD on port 3283"
-          else
-            echo "[INFO] ARD not available"
-          fi
-          
-          echo ""
-          echo "=== Desktop Session ==="
-          if pgrep -x Finder > /dev/null; then
-            echo "[OK] Finder running - desktop active"
-          else
-            echo "[WARN] No Finder - starting..."
-            open -a Finder
-          fi
-          
-          if pgrep -x Dock > /dev/null; then
-            echo "[OK] Dock running"
-          else
-            echo "[WARN] Dock not running"
-          fi
-          
-          echo ""
-          echo "=== All Listening Ports ==="
-          lsof -i -P 2>/dev/null | grep LISTEN | head -15
+          echo "=== Ports ==="
+          lsof -i -P 2>/dev/null | grep LISTEN | head -10
 
       - name: Display Connection Info
         run: |
-          echo ""
           echo "========================================================"
-          echo "              macOS REMOTE DESKTOP                       "
+          echo "              macOS REMOTE DESKTOP"
           echo "========================================================"
           echo ""
           echo "  Tailscale IP: $TAILSCALE_IP"
           echo ""
           echo "========================================================"
-          echo "  NOMACHINE - Connect to Physical Desktop               "
+          echo "  NOMACHINE (Recommended)"
           echo "========================================================"
           echo ""
-          echo "  1. Download NoMachine: https://nomachine.com/download"
+          echo "  Download: https://nomachine.com/download"
           echo ""
-          echo "  2. Create new connection:"
-          echo "     - Click 'Add' button"
-          echo "     - Protocol: NX"
-          echo "     - Host: $TAILSCALE_IP"
-          echo "     - Port: 4000"
+          echo "  Setup:"
+          echo "    1. Click Add"
+          echo "    2. Protocol: SSH"
+          echo "    3. Host: $TAILSCALE_IP"
+          echo "    4. Port: 22"
           echo ""
-          echo "  3. If NX port fails, use SSH:"
-          echo "     - Protocol: SSH"  
-          echo "     - Host: $TAILSCALE_IP"
-          echo "     - Port: 22"
+          echo "  Login:"
+          echo "    Username: kaiden"
+          echo "    Password: amaalik1"
           echo ""
-          echo "  4. Login credentials:"
-          echo "     - Username: runner"
-          echo "     - Password: (use SSH key or try empty)"
-          echo ""
-          echo "     OR use:"
-          echo "     - Username: kaiden"
-          echo "     - Password: amaalik1"
-          echo ""
-          echo "  5. When prompted, choose:"
-          echo "     'Connect to the physical desktop'"
-          echo "     NOT 'Create a new virtual desktop'"
+          echo "  Select: Connect to physical desktop"
           echo ""
           echo "========================================================"
-          echo "  ARD / VNC FALLBACK                                    "
+          echo "  ARD (Fallback)"
           echo "========================================================"
           echo ""
-          if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-            echo "  ARD Status: AVAILABLE"
-            echo "  Address: $TAILSCALE_IP:3283"
-            echo "  Clients: Screens 5, Jump Desktop, Royal TSX"
-          else
-            echo "  ARD Status: NOT AVAILABLE"
-          fi
-          echo ""
+          echo "  Address: $TAILSCALE_IP:3283"
+          echo "  Apps: Screens 5, Jump Desktop, Royal TSX"
           echo "  Username: kaiden"
           echo "  Password: amaalik1"
           echo ""
           echo "========================================================"
-          echo "  SSH ACCESS (Always Works)                             "
+          echo "  SSH"
           echo "========================================================"
           echo ""
           echo "  ssh kaiden@$TAILSCALE_IP"
           echo "  Password: amaalik1"
           echo ""
           echo "========================================================"
-          echo "  TROUBLESHOOTING BLACK SCREEN                          "
-          echo "========================================================"
-          echo ""
-          echo "  If you see black screen in NoMachine:"
-          echo ""
-          echo "  1. Make sure to select 'Connect to physical desktop'"
-          echo "     when NoMachine asks (NOT virtual desktop)"
-          echo ""
-          echo "  2. If still black, SSH in and run:"
-          echo "     open -a Finder"
-          echo "     caffeinate -u -t 5"
-          echo ""
-          echo "  3. In NoMachine settings, try:"
-          echo "     - Display -> Use custom resolution"
-          echo "     - Set to 1280x720"
-          echo ""
-          echo "========================================================"
 
       - name: Keep Alive
         run: |
-          NXSERVER="${NXSERVER:-/etc/NX/nxserver}"
+          NXSERVER=/etc/NX/nxserver
           
           while true; do
-            TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-            echo ""
-            echo "[$TIMESTAMP] === Health Check ==="
-            echo "IP: $TAILSCALE_IP"
+            NOW=$(date +%H:%M:%S)
+            echo "[$NOW] Health check - IP: $TAILSCALE_IP"
             
-            # Check NoMachine
-            NX_COUNT=$(pgrep -c nxserver 2>/dev/null || echo "0")
-            if [ "$NX_COUNT" -gt 0 ]; then
-              echo "[OK] No
+            if pgrep -x nxserver > /dev/null 2>&1; then
+              echo "  NoMachine: OK"
+            else
+              echo "  NoMachine: restarting"
+              sudo $NXSERVER --startup 2>/dev/null || true
+            fi
+            
+            if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              echo "  ARD: OK"
+            else
+              echo "  ARD: restarting"
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent 2>/dev/null || true
+            fi
+            
+            pgrep -x Finder > /dev/null || open -a Finder
+            
+            caffeinate -u -t 60 &
+            sleep 300
+          done
