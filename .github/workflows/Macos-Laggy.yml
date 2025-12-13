@@ -1,4 +1,4 @@
-name: macOS (Released But Lag)
+name: macOS (Laggy)
 
 on:
   workflow_dispatch:
