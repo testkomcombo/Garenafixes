@@ -1,4 +1,4 @@
-name: macOS-Remote-Claude
+name: macOS (Released But Lag)
 
 on:
   workflow_dispatch:
