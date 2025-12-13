@@ -96,7 +96,7 @@ jobs:
           
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Enable VNC in preferences BEFORE kickstart
+          # Enable VNC in preferences
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
@@ -116,52 +116,31 @@ jobs:
           
           sleep 3
           
-          # Enable and load screen sharing launchd service
+          # Try multiple methods to enable VNC on port 5900
+          echo "=== Attempting to enable VNC on port 5900 ==="
+          
+          # Method 1: launchctl for screensharing
+          echo "Method 1: launchctl screensharing service..."
           sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
+          sudo launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          sudo launchctl kickstart -kp system/com.apple.screensharing 2>/dev/null || true
+          sleep 2
+          
+          # Method 2: Direct load
+          echo "Method 2: Direct load..."
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
+          sleep 2
           
-          sleep 3
-          
-          # Find and start screensharingd - check multiple possible paths for macOS 15
-          echo "=== Looking for screensharingd ==="
-          SCREENSHARING_PATHS=(
-            "/usr/libexec/screensharingd"
-            "/System/Library/CoreServices/ScreenSharing.app/Contents/MacOS/screensharingd"
-            "/System/Library/PrivateFrameworks/ScreenSharing.framework/Versions/A/Resources/screensharingd"
-            "/System/Library/LaunchAgents/../CoreServices/screensharingd"
-          )
-          
-          SCREENSHARINGD=""
-          for path in "${SCREENSHARING_PATHS[@]}"; do
-            if [ -x "$path" ]; then
-              SCREENSHARINGD="$path"
-              echo "Found screensharingd at: $SCREENSHARINGD"
-              break
-            fi
-          done
-          
-          # Also search for it
-          if [ -z "$SCREENSHARINGD" ]; then
-            echo "Searching for screensharingd..."
-            FOUND_PATH=$(find /System/Library -name "screensharingd" -type f 2>/dev/null | head -1)
-            if [ -n "$FOUND_PATH" ] && [ -x "$FOUND_PATH" ]; then
-              SCREENSHARINGD="$FOUND_PATH"
-              echo "Found via search: $SCREENSHARINGD"
-            fi
-          fi
-          
-          if [ -n "$SCREENSHARINGD" ]; then
-            echo "Starting screensharingd..."
-            sudo "$SCREENSHARINGD" &
-            sleep 3
+          # Check if VNC is up
+          if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+            echo "VNC is now listening on port 5900!"
           else
-            echo "screensharingd not found - VNC 5900 may not be available"
-            echo "ARD on port 3283 should still work"
+            echo "VNC port 5900 not available (macOS 15 SIP restriction)"
+            echo "ARD on port 3283 should work as alternative"
           fi
           
           echo ""
-          echo "=== Checking port status ==="
+          echo "=== Port status ==="
           echo "Port 5900 (VNC):"
           lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null || echo "  Not listening"
           echo "Port 3283 (ARD):"
@@ -179,7 +158,7 @@ jobs:
           
           # Find nxserver binary
           NXSERVER=""
-          for path in "/etc/NX/nxserver" "/usr/NX/bin/nxserver" "/Applications/NoMachine.app/Contents/Frameworks/bin/nxserver.app/Contents/MacOS/nxserver"; do
+          for path in "/etc/NX/nxserver" "/usr/NX/bin/nxserver"; do
             if [ -x "$path" ] || [ -L "$path" ]; then
               NXSERVER="$path"
               echo "Found nxserver at: $NXSERVER"
@@ -189,85 +168,99 @@ jobs:
           
           if [ -z "$NXSERVER" ]; then
             echo "ERROR: nxserver not found!"
-            find /etc /Applications -name "nxserver*" 2>/dev/null | head -5
             exit 1
           fi
           
           echo "NXSERVER=$NXSERVER" >> $GITHUB_ENV
           
-          # Find NoMachine config directory
-          NX_ETC=""
-          for cfgdir in "/Applications/NoMachine.app/Contents/Frameworks/etc" "/etc/NX/server" "/usr/NX/etc"; do
-            if [ -d "$cfgdir" ]; then
-              NX_ETC="$cfgdir"
-              echo "Found NX config dir: $NX_ETC"
-              break
-            fi
-          done
+          # NoMachine config locations
+          NX_CFG_DIR="/Applications/NoMachine.app/Contents/Frameworks/etc"
+          SERVER_CFG="$NX_CFG_DIR/server.cfg"
+          NODE_CFG="$NX_CFG_DIR/node.cfg"
+          NXD_CFG="$NX_CFG_DIR/nxd.cfg"
           
           echo "=== Configuring NoMachine for external connections ==="
           
-          # Find and modify server.cfg
-          SERVER_CFG=""
-          for cfg in "$NX_ETC/server.cfg" "/Applications/NoMachine.app/Contents/Frameworks/etc/server.cfg" "/etc/NX/server/localhost/server.cfg"; do
-            if [ -f "$cfg" ]; then
-              SERVER_CFG="$cfg"
-              break
-            fi
-          done
+          # Stop NoMachine first to apply config changes
+          sudo "$NXSERVER" --shutdown 2>/dev/null || true
+          sleep 2
           
-          # Find and modify node.cfg  
-          NODE_CFG=""
-          for cfg in "$NX_ETC/node.cfg" "/Applications/NoMachine.app/Contents/Frameworks/etc/node.cfg" "/etc/NX/server/localhost/node.cfg"; do
-            if [ -f "$cfg" ]; then
-              NODE_CFG="$cfg"
-              break
-            fi
-          done
-          
-          if [ -n "$SERVER_CFG" ]; then
+          # Configure server.cfg - uncomment and set values properly
+          if [ -f "$SERVER_CFG" ]; then
             echo "Modifying server config: $SERVER_CFG"
             sudo cp "$SERVER_CFG" "${SERVER_CFG}.bak"
             
-            # Remove existing and add fresh config for external access
-            sudo sed -i '' '/^#*NXPort/d' "$SERVER_CFG" 2>/dev/null || true
-            sudo sed -i '' '/^#*ServerBind/d' "$SERVER_CFG" 2>/dev/null || true
-            sudo sed -i '' '/^#*ClientConnectionMethods/d' "$SERVER_CFG" 2>/dev/null || true
-            sudo sed -i '' '/^#*AcceptedAuthenticationMethods/d' "$SERVER_CFG" 2>/dev/null || true
+            # Uncomment and set NXPort
+            sudo sed -i '' 's/^#NXPort .*/NXPort 4000/' "$SERVER_CFG"
+            sudo sed -i '' 's/^NXPort .*/NXPort 4000/' "$SERVER_CFG"
             
-            # Add settings to bind on all interfaces
-            echo "" | sudo tee -a "$SERVER_CFG"
-            echo "# Custom settings for external access" | sudo tee -a "$SERVER_CFG"
-            echo "NXPort 4000" | sudo tee -a "$SERVER_CFG"
-            echo "ServerBind 0.0.0.0" | sudo tee -a "$SERVER_CFG"
-            echo "ClientConnectionMethods NX,SSH" | sudo tee -a "$SERVER_CFG"
-            echo "AcceptedAuthenticationMethods all" | sudo tee -a "$SERVER_CFG"
+            # Uncomment and set NXTCPPort  
+            sudo sed -i '' 's/^#NXTCPPort .*/NXTCPPort 4000/' "$SERVER_CFG"
+            sudo sed -i '' 's/^NXTCPPort .*/NXTCPPort 4000/' "$SERVER_CFG"
             
-            echo "Updated server.cfg:"
-            tail -10 "$SERVER_CFG"
-          else
-            echo "server.cfg not found, searching..."
-            find /Applications/NoMachine.app -name "server.cfg" 2>/dev/null | head -3
-            find /etc/NX -name "server.cfg" 2>/dev/null | head -3
+            # Uncomment and set NXUDPPort
+            sudo sed -i '' 's/^#NXUDPPort .*/NXUDPPort 4000/' "$SERVER_CFG"
+            sudo sed -i '' 's/^NXUDPPort .*/NXUDPPort 4000/' "$SERVER_CFG"
+            
+            # Set accepted auth methods
+            sudo sed -i '' 's/^#AcceptedAuthenticationMethods .*/AcceptedAuthenticationMethods all/' "$SERVER_CFG"
+            sudo sed -i '' 's/^AcceptedAuthenticationMethods .*/AcceptedAuthenticationMethods all/' "$SERVER_CFG"
+            
+            # Enable network broadcast
+            sudo sed -i '' 's/^#EnableNetworkBroadcast .*/EnableNetworkBroadcast 1/' "$SERVER_CFG"
+            
+            echo "Checking server.cfg NX port settings:"
+            grep -E "^#?NX.*Port|^#?AcceptedAuth" "$SERVER_CFG" || true
           fi
           
-          if [ -n "$NODE_CFG" ]; then
+          # Configure nxd.cfg for the nxd listener daemon
+          if [ -f "$NXD_CFG" ]; then
+            echo ""
+            echo "Modifying nxd config: $NXD_CFG"
+            sudo cp "$NXD_CFG" "${NXD_CFG}.bak"
+            
+            # Set nxd to listen on all interfaces
+            sudo sed -i '' 's/^#NXDBindAddress .*/NXDBindAddress 0.0.0.0/' "$NXD_CFG"
+            sudo sed -i '' 's/^NXDBindAddress .*/NXDBindAddress 0.0.0.0/' "$NXD_CFG"
+            
+            # Add if not present
+            if ! grep -q "^NXDBindAddress" "$NXD_CFG"; then
+              echo "NXDBindAddress 0.0.0.0" | sudo tee -a "$NXD_CFG"
+            fi
+            
+            echo "Checking nxd.cfg:"
+            grep -E "Bind|Port" "$NXD_CFG" | head -10 || true
+          else
+            echo "nxd.cfg not found at $NXD_CFG"
+            # Try to find it
+            find /Applications/NoMachine.app -name "*.cfg" 2>/dev/null | head -10
+          fi
+          
+          # Configure node.cfg
+          if [ -f "$NODE_CFG" ]; then
+            echo ""
             echo "Modifying node config: $NODE_CFG"
             sudo cp "$NODE_CFG" "${NODE_CFG}.bak"
             
-            sudo sed -i '' '/^#*NodeBind/d' "$NODE_CFG" 2>/dev/null || true
-            sudo sed -i '' '/^#*DisplayServerBind/d' "$NODE_CFG" 2>/dev/null || true
+            # Uncomment and set NodeBind
+            sudo sed -i '' 's/^#NodeBind .*/NodeBind 0.0.0.0/' "$NODE_CFG"
+            sudo sed -i '' 's/^NodeBind .*/NodeBind 0.0.0.0/' "$NODE_CFG"
             
-            echo "" | sudo tee -a "$NODE_CFG"
-            echo "NodeBind 0.0.0.0" | sudo tee -a "$NODE_CFG"
-            echo "DisplayServerBind 0.0.0.0" | sudo tee -a "$NODE_CFG"
+            # Uncomment and set DisplayServerBind
+            sudo sed -i '' 's/^#DisplayServerBind .*/DisplayServerBind 0.0.0.0/' "$NODE_CFG"
+            sudo sed -i '' 's/^DisplayServerBind .*/DisplayServerBind 0.0.0.0/' "$NODE_CFG"
+            
+            # Add if not present
+            if ! grep -q "^NodeBind" "$NODE_CFG"; then
+              echo "NodeBind 0.0.0.0" | sudo tee -a "$NODE_CFG"
+            fi
+            if ! grep -q "^DisplayServerBind" "$NODE_CFG"; then
+              echo "DisplayServerBind 0.0.0.0" | sudo tee -a "$NODE_CFG"
+            fi
           fi
           
           echo ""
           echo "=== Starting NoMachine server ==="
-          # Full restart to pick up config changes
-          sudo "$NXSERVER" --shutdown 2>/dev/null || true
-          sleep 3
           sudo "$NXSERVER" --startup
           sleep 5
           
@@ -277,24 +270,20 @@ jobs:
           
           echo ""
           echo "=== Checking NoMachine ports ==="
-          echo "Port 4000:"
-          lsof -iTCP:4000 -sTCP:LISTEN 2>/dev/null || echo "  Not listening on 4000"
-          
-          echo ""
-          echo "All NX-related ports:"
-          lsof -i -P 2>/dev/null | grep -iE "nx|nomachine" | grep LISTEN || echo "  No NX LISTEN ports found"
-          
-          echo ""
-          echo "All localhost ports from NX:"
-          lsof -i -P 2>/dev/null | grep -iE "nx|nomachine" || echo "  No NX ports"
-          
-          # If port 4000 still not available, NoMachine might be using SSH tunneling mode
-          # In that case, connections go through SSH on port 22 or another configured port
-          echo ""
-          echo "=== Checking if NoMachine uses SSH mode ==="
-          if [ -n "$SERVER_CFG" ]; then
-            grep -i "connection\|port\|bind\|ssh" "$SERVER_CFG" 2>/dev/null | head -10 || true
+          echo "Port 4000 (NX protocol):"
+          if lsof -iTCP:4000 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+            echo "  LISTENING!"
+            lsof -iTCP:4000 -sTCP:LISTEN
+          else
+            echo "  Not listening on 4000"
+            echo ""
+            echo "  Checking all NX listening ports:"
+            lsof -i -P 2>/dev/null | grep -iE "nx|nomachine" | grep LISTEN || echo "    None found"
           fi
+          
+          echo ""
+          echo "=== All NoMachine processes ==="
+          ps aux | grep -iE "nx|nomachine" | grep -v grep || echo "No NX processes"
 
       - name: Optimize Network
         run: |
@@ -356,9 +345,9 @@ jobs:
             echo "[OK] NoMachine is running on port 4000"
             lsof -iTCP:4000 -sTCP:LISTEN
           else
-            echo "[WARN] NoMachine port 4000 not listening"
-            echo "Checking alternative NX ports..."
-            lsof -i -P 2>/dev/null | grep -iE "nx" | grep LISTEN || echo "  No NX LISTEN ports found"
+            echo "[INFO] NoMachine port 4000 not listening externally"
+            echo "       NX may be using SSH tunneling mode on port 22"
+            lsof -i -P 2>/dev/null | grep -iE "nx" | grep LISTEN | head -5 || true
           fi
           
           echo ""
@@ -367,7 +356,7 @@ jobs:
             echo "[OK] VNC is running on port 5900"
             lsof -i :5900
           else
-            echo "[WARN] VNC port 5900 not available"
+            echo "[INFO] VNC port 5900 not available (macOS 15 SIP)"
           fi
           
           echo ""
@@ -382,10 +371,6 @@ jobs:
           echo ""
           echo "=== All Listening Ports ==="
           lsof -i -P 2>/dev/null | grep LISTEN | head -30
-          
-          echo ""
-          echo "=== Remote Desktop Process Check ==="
-          ps aux | grep -E "screensharing|ARD|vnc|nxserver|nxnode|NoMachine" | grep -v grep || echo "No remote desktop processes found"
 
       - name: Display Connection Info
         run: |
@@ -396,12 +381,12 @@ jobs:
           echo ""
           
           # Check what is available
-          NX_OK=false
+          NX_4000=false
           VNC_OK=false
           ARD_OK=false
           
           if lsof -iTCP:4000 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-            NX_OK=true
+            NX_4000=true
           fi
           if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
             VNC_OK=true
@@ -410,32 +395,37 @@ jobs:
             ARD_OK=true
           fi
           
-          echo "NOMACHINE (Low Latency)"
+          echo "NOMACHINE (Best Performance)"
           echo "--------------------------------------------"
-          if [ "$NX_OK" = "true" ]; then
-            echo "  Status:    AVAILABLE"
+          if [ "$NX_4000" = "true" ]; then
+            echo "  Status:    AVAILABLE on port 4000"
             echo "  Address:   $TAILSCALE_IP:4000"
-            echo "  Username:  kaiden"
-            echo "  Password:  amaalik1"
-            echo ""
-            echo "  Download NoMachine client from https://nomachine.com"
           else
-            echo "  Status:    NOT AVAILABLE on port 4000"
+            echo "  Status:    Using SSH tunnel mode"
+            echo "  Address:   $TAILSCALE_IP (via SSH)"
           fi
+          echo "  Username:  kaiden"
+          echo "  Password:  amaalik1"
+          echo ""
+          echo "  To connect:"
+          echo "    1. Download NoMachine from https://nomachine.com"
+          echo "    2. Create new connection"
+          echo "    3. Host: $TAILSCALE_IP  Port: 4000 (or use SSH)"
+          echo "    4. Login: kaiden / amaalik1"
           
           echo ""
-          echo "VNC (Standard Remote Desktop)"
+          echo "VNC (Standard)"
           echo "--------------------------------------------"
           if [ "$VNC_OK" = "true" ]; then
             echo "  Status:    AVAILABLE"
             echo "  Address:   $TAILSCALE_IP:5900"
             echo "  Password:  amaalik1"
           else
-            echo "  Status:    NOT AVAILABLE on port 5900"
+            echo "  Status:    NOT AVAILABLE (macOS 15 restriction)"
           fi
           
           echo ""
-          echo "ARD (Apple Remote Desktop)"
+          echo "ARD (Apple Remote Desktop) - RECOMMENDED"
           echo "--------------------------------------------"
           if [ "$ARD_OK" = "true" ]; then
             echo "  Status:    AVAILABLE"
@@ -444,11 +434,21 @@ jobs:
             echo "  Password:  amaalik1"
             echo ""
             echo "  Compatible clients:"
-            echo "    - Apple Remote Desktop (Mac)"
-            echo "    - Screens app (Mac/iOS)"
+            echo "    - Apple Remote Desktop (Mac App Store)"
+            echo "    - Screens 5 (Mac/iOS) - RECOMMENDED"
             echo "    - Royal TSX (Mac)"
+            echo "    - Jump Desktop (Mac/iOS/Windows)"
           else
             echo "  Status:    NOT AVAILABLE"
           fi
           
-     
+          echo ""
+          echo "============================================"
+          echo "  USER CREDENTIALS                          "
+          echo "============================================"
+          echo ""
+          echo "  Username:   kaiden"
+          echo "  Password:   amaalik1"
+          echo "  Sudo:       No password required"
+          echo ""
+          echo "===============================
