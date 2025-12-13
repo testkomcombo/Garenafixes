@@ -7,6 +7,10 @@ jobs:
   macos-rdp:
     runs-on: macos-latest
     timeout-minutes: 3600
+    defaults:
+      run:
+        shell: bash
+        working-directory: /
 
     steps:
       - name: Get macOS Version
@@ -14,6 +18,9 @@ jobs:
 
       - name: Create User with Full Admin
         run: |
+          # Avoid occasional getcwd issues in GitHub runners if the default cwd becomes inaccessible
+          cd /
+
           sudo dscl . -create /Users/kaiden
           sudo dscl . -create /Users/kaiden UserShell /bin/zsh
           sudo dscl . -create /Users/kaiden RealName "Kaiden"
@@ -21,29 +28,29 @@ jobs:
           sudo dscl . -create /Users/kaiden PrimaryGroupID 80
           sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
           sudo dscl . -passwd /Users/kaiden "amaalik1"
-          
+
           sudo dscl . -append /Groups/admin GroupMembership kaiden
           sudo dscl . -append /Groups/wheel GroupMembership kaiden
           sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
-          
+
           sudo createhomedir -c -u kaiden
-          
+
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           sudo chmod 440 /etc/sudoers.d/kaiden
 
       - name: Fix TCC Permissions First
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          
+
           # Screen Capture
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
-          
+
           # Post Event
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
-          
+
           # Accessibility
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','/usr/libexec/screensharingd',1,2,4,1);" 2>/dev/null || true
@@ -51,13 +58,10 @@ jobs:
       - name: Set Resolution
         run: |
           brew install displayplacer
-          echo "=== displayplacer list ==="
+          echo "=== displayplacer list (before) ==="
           displayplacer list || true
 
-          # Auto-detect a display id from displayplacer list output.
-          # Tries common formats:
-          #   "Persistent screen id: <id>"
-          #   "id:<id>"
+          # Prefer Persistent screen id (works well on runners), fall back to "id:<n>" if needed.
           DISPLAY_ID="$(
             displayplacer list 2>/dev/null | awk -F': ' '/Persistent screen id:/ {print $2; exit}'
           )"
@@ -79,10 +83,13 @@ jobs:
             echo "Could not detect display id via displayplacer; skipping resolution change."
           fi
 
+          echo "=== displayplacer list (after) ==="
+          displayplacer list || true
+
       - name: Enable ARD with VNC Enabled
         run: |
           echo "=== Enabling Apple Remote Desktop (ARD) + VNC (single method) ==="
-          
+
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure \
@@ -93,19 +100,87 @@ jobs:
             -clientopts -setreqperm -reqperm no \
             -allowAccessFor -allUsers \
             -restart -agent -menu || true
-          
+
           sleep 5
-          echo "=== Port check (5900) ==="
+
+          echo "=== Port check (5900 VNC, 3283 ARD) ==="
           lsof -nP -iTCP:5900 -sTCP:LISTEN || echo "VNC is not listening on 5900 (may be restricted on GitHub runners)."
+          lsof -nP -iTCP:3283 -sTCP:LISTEN || true
 
       - name: Install NoMachine (NX) and Start Server
         run: |
           brew install --cask nomachine
-          
+
+          echo "=== Locating nxserver ==="
+          # Homebrew cask install sometimes provides /etc/NX/nxserver without /usr/NX/bin/nxserver.
+          # Create a stable canonical path at /usr/NX/bin/nxserver if needed.
+          if [ -x /etc/NX/nxserver ] && [ ! -x /usr/NX/bin/nxserver ]; then
+            sudo mkdir -p /usr/NX/bin
+            sudo ln -sf /etc/NX/nxserver /usr/NX/bin/nxserver
+          fi
+
+          NXSERVER_BIN=""
+          for c in /usr/NX/bin/nxserver /etc/NX/nxserver "/Applications/NoMachine.app/Contents/MacOS/nxserver"; do
+            if [ -x "$c" ]; then
+              NXSERVER_BIN="$c"
+              break
+            fi
+          done
+
+          if [ -z "$NXSERVER_BIN" ]; then
+            echo "ERROR: nxserver binary not found after install."
+            echo "Known locations checked: /usr/NX/bin/nxserver, /etc/NX/nxserver, /Applications/NoMachine.app/Contents/MacOS/nxserver"
+            echo "Dumping hints:"
+            ls -la /etc/NX 2>/dev/null || true
+            ls -la /usr/NX/bin 2>/dev/null || true
+            ls -la /Applications/NoMachine.app/Contents/MacOS 2>/dev/null || true
+            exit 0
+          fi
+
+          echo "NXSERVER_BIN=$NXSERVER_BIN" | tee -a "$GITHUB_ENV"
+          echo "Using nxserver: $NXSERVER_BIN"
+
           echo "=== Starting NoMachine server ==="
-          sudo /usr/NX/bin/nxserver --startup || true
-          
-          sleep 3
+          sudo "$NXSERVER_BIN" --startup || true
+          sleep 5
+
+          echo "=== nxserver status (if supported) ==="
+          sudo "$NXSERVER_BIN" --status || true
+
+          echo "=== Ensure NX port is 4000 in config (best effort) ==="
+          CFG=""
+          for f in /etc/NX/server.cfg /usr/NX/etc/server.cfg; do
+            if [ -f "$f" ]; then
+              CFG="$f"
+              break
+            fi
+          done
+
+          if [ -n "$CFG" ]; then
+            echo "Found server config: $CFG"
+            echo "--- Current port-related lines ---"
+            sudo grep -nE '(^\s*#?\s*NXPort\s+|^\s*#?\s*Port\s+)' "$CFG" || true
+
+            # If NXPort exists (commented or not), normalize it to 4000; otherwise append.
+            if sudo grep -qE '^\s*#?\s*NXPort\s+' "$CFG"; then
+              sudo sed -i '' -E 's/^\s*#?\s*NXPort\s+.*/NXPort 4000/' "$CFG" || true
+            else
+              echo "NXPort 4000" | sudo tee -a "$CFG" >/dev/null
+            fi
+
+            echo "--- After update ---"
+            sudo grep -nE '(^\s*NXPort\s+|^\s*Port\s+)' "$CFG" || true
+
+            echo "=== Restarting NoMachine after config touch ==="
+            sudo "$NXSERVER_BIN" --restart 2>/dev/null || {
+              sudo "$NXSERVER_BIN" --shutdown 2>/dev/null || true
+              sudo "$NXSERVER_BIN" --startup 2>/dev/null || true
+            }
+          else
+            echo "No server.cfg found at /etc/NX/server.cfg or /usr/NX/etc/server.cfg; skipping config enforcement."
+          fi
+
+          sleep 5
           echo "=== Port check (4000) ==="
           lsof -nP -iTCP:4000 -sTCP:LISTEN || echo "NoMachine is not listening on 4000."
 
@@ -116,35 +191,38 @@ jobs:
           echo "         FINAL REMOTE GUI STATUS            "
           echo "============================================"
           echo ""
-          
-          NX_RUNNING=false
-          VNC_RUNNING=false
-          
+
+          if [ -n "${NXSERVER_BIN:-}" ]; then
+            echo "NoMachine nxserver path: $NXSERVER_BIN"
+          else
+            echo "NoMachine nxserver path: (not set)"
+          fi
+
+          echo ""
+
           if lsof -nP -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
-            echo "✅ NoMachine (NX) is running on port 4000"
-            NX_RUNNING=true
+            echo "✅ NoMachine (NX) is listening on TCP 4000"
             lsof -nP -iTCP:4000 -sTCP:LISTEN || true
           else
             echo "❌ NoMachine (NX) port 4000 not available"
           fi
-          
+
           echo ""
-          
+
           if lsof -nP -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
-            echo "✅ VNC is running on port 5900"
-            VNC_RUNNING=true
+            echo "✅ VNC is listening on TCP 5900"
             lsof -nP -iTCP:5900 -sTCP:LISTEN || true
           else
             echo "❌ VNC port 5900 not available"
           fi
-          
+
           echo ""
-          echo "=== Listener Snapshot (top 30) ==="
-          lsof -nP -iTCP -sTCP:LISTEN | head -30 || true
-          
+          echo "=== Listener Snapshot (top 40) ==="
+          lsof -nP -iTCP -sTCP:LISTEN | head -40 || true
+
           echo ""
           echo "=== Process Check (ARD / screensharing / NX) ==="
-          ps aux | grep -E "ARDAgent|RemoteManagement|screensharing|nx(server|node|service)|NoMachine" | grep -v grep || echo "No matching processes found"
+          ps aux | grep -E "ARDAgent|RemoteManagement|screensharing|nx(server|node|runner|d)\b|NoMachine" | grep -v grep || echo "No matching processes found"
 
       - name: Optimize Network
         run: |
@@ -157,7 +235,7 @@ jobs:
       - name: Install Firefox and Create Shortcuts
         run: |
           brew install --cask firefox 2>/dev/null || true
-          
+
           sudo mkdir -p /Users/kaiden/Desktop
           sudo ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox" 2>/dev/null || true
           sudo ln -sf "/Applications/Safari.app" "/Users/kaiden/Desktop/Safari" 2>/dev/null || true
@@ -170,22 +248,22 @@ jobs:
         run: |
           sudo mkdir -p /var/lib/tailscale
           sudo mkdir -p /var/run/tailscale
-          
+
           sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
             --state=/var/lib/tailscale/tailscaled.state \
             --socket=/var/run/tailscale/tailscaled.sock \
             > /tmp/tailscaled.log 2>&1 &
-          
+
           sleep 8
-          
+
           sudo /opt/homebrew/opt/tailscale/bin/tailscale \
             --socket=/var/run/tailscale/tailscaled.sock \
             up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=macos-runner-${{ github.run_id }}
-          
+
           sleep 5
-          
+
           TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
@@ -201,7 +279,7 @@ jobs:
           echo "        macOS REMOTE ACCESS                 "
           echo "============================================"
           echo ""
-          
+
           echo "✅ RECOMMENDED (FAST): NoMachine (NX)"
           if lsof -nP -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
             echo ""
@@ -211,8 +289,9 @@ jobs:
           else
             echo ""
             echo "  ⚠️  NoMachine is not currently listening on port 4000."
+            echo "  (The workflow will keep trying to start it in the Keep Alive loop.)"
           fi
-          
+
           echo ""
           echo "--------------------------------------------"
           echo "Fallback: VNC"
@@ -227,7 +306,7 @@ jobs:
             echo "  This is a known limitation of GitHub Actions macOS runners."
             echo "  The runner has no real display and screen sharing cannot bind."
           fi
-          
+
           echo ""
           echo "USER:"
           echo "  Username:   kaiden (FULL ADMIN)"
@@ -246,24 +325,33 @@ jobs:
         run: |
           while true; do
             echo "[$(date)] Tailscale IP: $TAILSCALE_IP"
-            
+
             # Keep NoMachine alive
             if lsof -nP -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
-              echo "NoMachine: Running on port 4000"
+              echo "NoMachine: Listening on port 4000"
             else
-              echo "NoMachine: Not running (trying startup...)"
-              sudo /usr/NX/bin/nxserver --startup 2>/dev/null || true
+              echo "NoMachine: Not listening on 4000 (trying startup/restart...)"
+              NXBIN="${NXSERVER_BIN:-/usr/NX/bin/nxserver}"
+              if [ -x "$NXBIN" ]; then
+                sudo "$NXBIN" --startup 2>/dev/null || true
+                sleep 2
+                if ! lsof -nP -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
+                  sudo "$NXBIN" --restart 2>/dev/null || true
+                fi
+              else
+                echo "NoMachine: nxserver not found at $NXBIN"
+              fi
             fi
-            
-            # Keep VNC alive (fallback)
+
+            # Keep VNC alive (fallback) via kickstart only
             if lsof -nP -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
-              echo "VNC: Running on port 5900"
+              echo "VNC: Listening on port 5900"
             else
-              echo "VNC: Not running (trying ARD agent restart...)"
+              echo "VNC: Not listening on 5900 (trying ARD agent restart...)"
               sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
                 -restart -agent 2>/dev/null || true
             fi
-            
+
             caffeinate -u -t 60 &
             sleep 300
           done
