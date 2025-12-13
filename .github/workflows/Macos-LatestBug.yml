@@ -1,4 +1,4 @@
-name: macOS-Remote-Last
+name: macOS-Remote-T1
 
 on:
   workflow_dispatch:
@@ -51,13 +51,33 @@ jobs:
       - name: Set Resolution
         run: |
           brew install displayplacer
-          displayplacer "id:1 res:1920x1080 hz:60 color_depth:7"
-
-      - name: Method 1 - Start screensharingd Directly
-        run: |
-          echo "=== Trying screensharingd directly ==="
           
-          # Set VNC password
+          echo "=== Detecting display ID ==="
+          DISPLAY_ID=$(displayplacer list 2>/dev/null | grep -E "^Persistent screen id:" | head -1 | sed 's/Persistent screen id: //')
+          
+          if [ -n "$DISPLAY_ID" ]; then
+            echo "Detected display ID: $DISPLAY_ID"
+            echo "Setting resolution to 1280x720 @ 60Hz..."
+            if displayplacer "id:$DISPLAY_ID res:1280x720 hz:60 color_depth:7"; then
+              echo "✅ Resolution set successfully"
+            else
+              echo "⚠️  Failed with detected ID, trying fallback id:1..."
+              displayplacer "id:1 res:1280x720 hz:60 color_depth:7" 2>/dev/null || echo "Fallback also failed, continuing anyway"
+            fi
+          else
+            echo "⚠️  Could not detect display ID, using fallback id:1"
+            displayplacer "id:1 res:1280x720 hz:60 color_depth:7" 2>/dev/null || echo "Fallback failed, continuing anyway"
+          fi
+          
+          echo ""
+          echo "=== Current display configuration ==="
+          displayplacer list 2>/dev/null || true
+
+      - name: Start VNC via ARD Kickstart
+        run: |
+          echo "=== Configuring Apple Remote Desktop with VNC ==="
+          
+          # Set VNC password file
           echo "amaalik1" | sudo perl -we '
             $pw = <STDIN>;
             chomp $pw;
@@ -69,25 +89,10 @@ jobs:
             print pack "C*", @p;
           ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null || true
           
-          # Enable screen sharing
+          # Enable screen sharing via defaults
           sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false 2>/dev/null || true
           
-          # Start screensharingd
-          sudo /usr/libexec/screensharingd &
-          sleep 3
-          
-          lsof -i :5900 || echo "Method 1 failed"
-
-      - name: Method 2 - ARD with VNC Enabled
-        run: |
-          if lsof -i :5900 | grep -q LISTEN; then
-            echo "Already listening, skipping"
-            exit 0
-          fi
-          
-          echo "=== Trying ARD method ==="
-          
-          # Configure and start
+          # Configure and start ARD with VNC using kickstart
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure \
@@ -100,133 +105,40 @@ jobs:
             -restart -agent -menu
           
           sleep 5
-          lsof -i :5900 || echo "Method 2 failed"
-
-      - name: Method 3 - Install OSXvnc (Vine Server)
-        run: |
-          if lsof -i :5900 | grep -q LISTEN; then
-            echo "Already listening, skipping"
-            exit 0
-          fi
-          
-          echo "=== Installing Vine VNC Server ==="
-          
-          # Download OSXvnc
-          VINE_URL="https://github.com/OSXvnc/OSXvnc/releases/download/v5.3.1/OSXvnc_5.3.1.dmg"
-          
-          curl -L -o /tmp/osxvnc.dmg "$VINE_URL" 2>/dev/null || {
-            echo "Vine download failed, trying alternative..."
-          }
-          
-          if [ -f /tmp/osxvnc.dmg ]; then
-            hdiutil attach /tmp/osxvnc.dmg -nobrowse -quiet
-            sudo cp -R "/Volumes/OSXvnc/"*.app /Applications/ 2>/dev/null || true
-            hdiutil detach /Volumes/OSXvnc* -quiet 2>/dev/null || true
-          fi
-
-      - name: Method 4 - Use macOS Built-in with Manual Start
-        run: |
-          if lsof -i :5900 | grep -q LISTEN; then
-            echo "Already listening, skipping"
-            exit 0
-          fi
-          
-          echo "=== Manual screen sharing start ==="
-          
-          # Write preferences
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
-          
-          # Try launchctl
-          sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
-          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
-          
-          sleep 3
-          lsof -i :5900 || echo "Method 4 failed"
-
-      - name: Method 5 - Create Custom VNC Server
-        run: |
-          if lsof -i :5900 | grep -q LISTEN; then
-            echo "Already listening, skipping"
-            exit 0
-          fi
-          
-          echo "=== Creating custom VNC solution ==="
-          
-          # Install Python VNC server
-          pip3 install vncdotool pillow 2>/dev/null || true
-          
-          # Create a simple VNC wrapper script
-          cat > /tmp/vnc_wrapper.py << 'PYSCRIPT'
-          #!/usr/bin/env python3
-          import subprocess
-          import socket
-          import time
-          import os
-          
-          # Try to start screen sharing via AppleScript
-          script = '''
-          tell application "System Preferences"
-              reveal anchor "Sharing" of pane id "com.apple.preferences.sharing"
-          end tell
-          '''
-          try:
-              subprocess.run(['osascript', '-e', script], timeout=5)
-          except:
-              pass
-          
-          # Check if port is open
-          sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-          result = sock.connect_ex(('127.0.0.1', 5900))
-          sock.close()
-          
-          if result == 0:
-              print("VNC port 5900 is now open!")
-          else:
-              print("VNC port still closed")
-          PYSCRIPT
-          
-          python3 /tmp/vnc_wrapper.py || true
-          
-          sleep 2
-          lsof -i :5900 || echo "Method 5 failed"
-
-      - name: Method 6 - NoVNC Web-Based (Always Works)
-        run: |
-          echo "=== Setting up NoVNC (Web-based fallback) ==="
-          
-          # Install websockify
-          pip3 install websockify numpy 2>/dev/null || true
-          
-          # Download noVNC
-          git clone --depth 1 https://github.com/novnc/noVNC.git /tmp/novnc 2>/dev/null || true
-          
-          echo "NoVNC prepared as fallback"
-
-      - name: Final Check and Status
-        run: |
-          echo ""
-          echo "============================================"
-          echo "         FINAL VNC STATUS                   "
-          echo "============================================"
-          
-          VNC_RUNNING=false
           
           if lsof -i :5900 | grep -q LISTEN; then
             echo "✅ VNC is running on port 5900"
-            VNC_RUNNING=true
             lsof -i :5900
           else
-            echo "❌ VNC port 5900 not available"
-            echo ""
-            echo "Checking what IS running..."
-            lsof -i -P | grep LISTEN | head -20
+            echo "⚠️  VNC port 5900 not listening yet"
           fi
+
+      - name: Install and Start NoMachine
+        run: |
+          echo "=== Installing NoMachine (NX) for low-latency remote desktop ==="
           
-          echo ""
-          echo "=== Process Check ==="
-          ps aux | grep -E "screensharing|ARD|vnc" | grep -v grep || echo "No VNC processes found"
+          brew install --cask nomachine
+          
+          sleep 3
+          
+          echo "=== Starting NoMachine server ==="
+          sudo /usr/NX/bin/nxserver --startup || {
+            echo "First startup attempt completed, retrying..."
+            sleep 2
+            sudo /usr/NX/bin/nxserver --startup || true
+          }
+          
+          sleep 5
+          
+          echo "=== Verifying NoMachine is listening on TCP 4000 ==="
+          if lsof -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
+            echo "✅ NoMachine is running on port 4000"
+            lsof -iTCP:4000 -sTCP:LISTEN
+          else
+            echo "⚠️  NoMachine port 4000 not listening yet"
+            echo "Checking NoMachine server status..."
+            sudo /usr/NX/bin/nxserver --status || true
+          fi
 
       - name: Optimize Network
         run: |
@@ -270,6 +182,48 @@ jobs:
           
           TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=== Tailscale Network Diagnostics ==="
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock netcheck || true
+
+      - name: Final Check and Status
+        run: |
+          echo ""
+          echo "============================================"
+          echo "       FINAL REMOTE ACCESS STATUS           "
+          echo "============================================"
+          echo ""
+          
+          NX_RUNNING=false
+          VNC_RUNNING=false
+          
+          echo "=== NoMachine (NX) Status ==="
+          if lsof -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
+            echo "✅ NoMachine is running on port 4000"
+            NX_RUNNING=true
+            lsof -iTCP:4000 -sTCP:LISTEN
+          else
+            echo "❌ NoMachine port 4000 not available"
+          fi
+          
+          echo ""
+          echo "=== VNC Status ==="
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "✅ VNC is running on port 5900"
+            VNC_RUNNING=true
+            lsof -i :5900
+          else
+            echo "❌ VNC port 5900 not available"
+          fi
+          
+          echo ""
+          echo "=== All Listening Ports ==="
+          lsof -i -P | grep LISTEN | head -20
+          
+          echo ""
+          echo "=== Process Check ==="
+          ps aux | grep -E "screensharing|ARD|vnc|nxserver|nxnode" | grep -v grep || echo "No remote desktop processes found"
 
       - name: Display Connection Info
         run: |
@@ -279,20 +233,35 @@ jobs:
           echo "============================================"
           echo ""
           
-          if lsof -i :5900 | grep -q LISTEN; then
-            echo "✅ VNC AVAILABLE"
+          echo "🚀 NOMACHINE (RECOMMENDED - Low Latency)"
+          if lsof -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
+            echo "  ✅ Status:    AVAILABLE"
+            echo "  Address:     $TAILSCALE_IP:4000"
+            echo "  Username:    kaiden"
+            echo "  Password:    amaalik1"
             echo ""
-            echo "  Address:    $TAILSCALE_IP:5900"
-            echo "  Password:   amaalik1"
+            echo "  To connect: Install NoMachine client, add new connection"
+            echo "              Protocol: NX, Host: $TAILSCALE_IP, Port: 4000"
           else
-            echo "⚠️  VNC NOT AVAILABLE (macOS security restriction)"
-            echo ""
-            echo "  This is a known limitation of GitHub Actions macOS runners."
-            echo "  The runner has no real display and screen sharing cannot bind."
+            echo "  ❌ Status:    NOT AVAILABLE"
           fi
           
           echo ""
-          echo "USER:"
+          echo "📺 VNC (FALLBACK)"
+          if lsof -i :5900 | grep -q LISTEN; then
+            echo "  ✅ Status:    AVAILABLE"
+            echo "  Address:     $TAILSCALE_IP:5900"
+            echo "  Password:    amaalik1"
+          else
+            echo "  ⚠️  Status:    NOT AVAILABLE (macOS security restriction)"
+            echo "  This is a known limitation of GitHub Actions macOS runners."
+          fi
+          
+          echo ""
+          echo "============================================"
+          echo "  USER CREDENTIALS                          "
+          echo "============================================"
+          echo ""
           echo "  Username:   kaiden (FULL ADMIN)"
           echo "  Password:   amaalik1"
           echo "  Sudo:       No password required"
@@ -301,7 +270,6 @@ jobs:
           echo "  SSH ACCESS (Always Works)                 "
           echo "============================================"
           echo ""
-          echo "  You can use SSH instead:"
           echo "  ssh kaiden@$TAILSCALE_IP"
           echo ""
           echo "============================================"
@@ -311,7 +279,15 @@ jobs:
           while true; do
             echo "[$(date)] Tailscale IP: $TAILSCALE_IP"
             
-            # Try to keep VNC alive if it's running
+            # Monitor and restart NoMachine if needed
+            if lsof -iTCP:4000 -sTCP:LISTEN | grep -q LISTEN; then
+              echo "NoMachine: Running on port 4000"
+            else
+              echo "NoMachine: Not running (trying restart...)"
+              sudo /usr/NX/bin/nxserver --startup 2>/dev/null || true
+            fi
+            
+            # Monitor and restart VNC if needed
             if lsof -i :5900 | grep -q LISTEN; then
               echo "VNC: Running on port 5900"
             else
