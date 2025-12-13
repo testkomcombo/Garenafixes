@@ -1,4 +1,4 @@
-name: macOS (Laggy)
+name: macOS-remote Test
 
 on:
   workflow_dispatch:
