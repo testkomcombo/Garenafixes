@@ -1,4 +1,4 @@
-name: macOS Testing Beta
+name: macOS Beta Test
 
 on:
   workflow_dispatch:
@@ -35,29 +35,92 @@ jobs:
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
+          # Screen sharing permissions
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          
+          # RustDesk permissions
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
 
-      - name: Set Resolution
+      - name: Set Resolution (Fixed for available modes)
         run: |
           brew install displayplacer
           
-          echo "=== Detecting display ID ==="
+          echo "=== Detecting display and available modes ==="
+          displayplacer list
+          
           DISPLAY_ID=$(displayplacer list 2>/dev/null | grep -E "^Persistent screen id:" | head -1 | sed 's/Persistent screen id: //')
           
           if [ -n "$DISPLAY_ID" ]; then
+            echo ""
             echo "Detected display ID: $DISPLAY_ID"
-            echo "Setting resolution to 1280x720 @ 60Hz..."
-            displayplacer "id:$DISPLAY_ID res:1280x720 hz:60 color_depth:4" || displayplacer "id:1 res:1280x720 hz:60 color_depth:4" 2>/dev/null || true
-          else
-            displayplacer "id:1 res:1280x720 hz:60 color_depth:4" 2>/dev/null || true
+            echo "Setting resolution to 1280x720 @ 60Hz with color_depth:7..."
+            
+            # Use color_depth:7 which is available on GitHub runners
+            displayplacer "id:$DISPLAY_ID res:1280x720 hz:60 color_depth:7 scaling:off" 2>/dev/null || \
+            displayplacer "id:$DISPLAY_ID res:1024x768 hz:60 color_depth:7 scaling:off" 2>/dev/null || \
+            echo "Resolution change failed, using default"
           fi
           
+          echo ""
+          echo "=== Final display configuration ==="
           displayplacer list 2>/dev/null || true
 
-      - name: Start VNC via ARD Kickstart
+      - name: Reduce macOS Visual Effects (Reduce Lag)
+        run: |
+          # Disable animations and transparency for better remote performance
+          defaults write NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false
+          defaults write NSGlobalDomain NSWindowResizeTime -float 0.001
+          defaults write com.apple.dock autohide-time-modifier -float 0
+          defaults write com.apple.dock autohide-delay -float 0
+          defaults write com.apple.dock expose-animation-duration -float 0.1
+          defaults write com.apple.dock launchanim -bool false
+          defaults write com.apple.finder DisableAllAnimations -bool true
+          defaults write com.apple.universalaccess reduceMotion -bool true
+          defaults write com.apple.universalaccess reduceTransparency -bool true
+          
+          # Set a solid color background (reduces rendering)
+          osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Solid Colors/Black.png"' 2>/dev/null || true
+          
+          # Restart Dock to apply
+          killall Dock 2>/dev/null || true
+
+      - name: Install and Configure RustDesk (Fast Remote Desktop)
+        run: |
+          echo "=== Installing RustDesk ==="
+          brew install --cask rustdesk
+          
+          # Wait for installation
+          sleep 3
+          
+          # Create RustDesk config directory
+          mkdir -p /Users/kaiden/Library/Application\ Support/RustDesk/config
+          
+          # Set a permanent password for RustDesk
+          RUSTDESK_APP="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          
+          # Start RustDesk in background
+          echo "Starting RustDesk..."
+          open -a RustDesk
+          sleep 5
+          
+          # Set the password via command line
+          "$RUSTDESK_APP" --password amaalik1 2>/dev/null || true
+          
+          sleep 3
+          
+          echo ""
+          echo "=== RustDesk Status ==="
+          # Get RustDesk ID
+          RUSTDESK_ID=$("$RUSTDESK_APP" --get-id 2>/dev/null || echo "Check GUI")
+          echo "RustDesk ID: $RUSTDESK_ID"
+          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+
+      - name: Start VNC via ARD Kickstart (Backup)
         run: |
           echo "=== Configuring Apple Remote Desktop with VNC ==="
           
@@ -90,10 +153,6 @@ jobs:
             -restart -agent -menu
           
           sleep 3
-          
-          echo "=== Port status ==="
-          lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null || echo "VNC not listening"
-          lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null || echo "ARD not listening"
 
       - name: Optimize Network for Remote Desktop
         run: |
@@ -108,6 +167,8 @@ jobs:
           sudo sysctl -w kern.ipc.somaxconn=8192 || true
           # Disable power saving that can cause lag
           sudo pmset -a displaysleep 0 sleep 0 disksleep 0 || true
+          # Disable App Nap (causes lag in background apps)
+          defaults write NSGlobalDomain NSAppSleepDisabled -bool YES
 
       - name: Install Firefox and Create Shortcuts
         run: |
@@ -116,6 +177,7 @@ jobs:
           sudo mkdir -p /Users/kaiden/Desktop
           sudo ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox" 2>/dev/null || true
           sudo ln -sf "/Applications/Safari.app" "/Users/kaiden/Desktop/Safari" 2>/dev/null || true
+          sudo ln -sf "/Applications/RustDesk.app" "/Users/kaiden/Desktop/RustDesk" 2>/dev/null || true
           sudo chown -R kaiden:staff /Users/kaiden/Desktop
 
       - name: Install Tailscale
@@ -148,36 +210,12 @@ jobs:
           echo "=== Tailscale Network Diagnostics ==="
           sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock netcheck || true
 
-      - name: Final Check and Status
-        run: |
-          echo ""
-          echo "============================================"
-          echo "       FINAL REMOTE ACCESS STATUS           "
-          echo "============================================"
-          echo ""
-          
-          echo "=== VNC Status ==="
-          if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-            echo "[OK] VNC running on port 5900"
-          else
-            echo "[INFO] VNC 5900 not available (macOS 15 SIP restriction)"
-          fi
-          
-          echo ""
-          echo "=== ARD Status ==="
-          if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-            echo "[OK] ARD running on port 3283"
-            lsof -iTCP:3283 -sTCP:LISTEN
-          else
-            echo "[WARN] ARD not listening on 3283"
-          fi
-          
-          echo ""
-          echo "=== All Listening Ports ==="
-          lsof -i -P 2>/dev/null | grep LISTEN | head -20
-
       - name: Display Connection Info
         run: |
+          # Get RustDesk ID
+          RUSTDESK_APP="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          RUSTDESK_ID=$("$RUSTDESK_APP" --get-id 2>/dev/null || echo "Check RustDesk GUI on desktop")
+          
           echo ""
           echo "============================================"
           echo "        macOS REMOTE ACCESS                 "
@@ -185,47 +223,35 @@ jobs:
           echo ""
           echo "Tailscale IP: $TAILSCALE_IP"
           echo ""
-          
-          VNC_OK=false
-          ARD_OK=false
-          
-          lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN && VNC_OK=true
-          lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN && ARD_OK=true
-          
-          echo "--------------------------------------------"
-          echo "ARD (Apple Remote Desktop) - RECOMMENDED"
-          echo "--------------------------------------------"
-          if [ "$ARD_OK" = "true" ]; then
+          echo "============================================"
+          echo "🦀 RUSTDESK (RECOMMENDED - FASTEST)"
+          echo "============================================"
+          echo "  ID:       $RUSTDESK_ID"
+          echo "  Password: amaalik1"
+          echo ""
+          echo "  How to connect:"
+          echo "  1. Download RustDesk from https://rustdesk.com"
+          echo "  2. Enter the ID above"
+          echo "  3. Enter password: amaalik1"
+          echo ""
+          echo "============================================"
+          echo "🍎 ARD (Apple Remote Desktop) - BACKUP"
+          echo "============================================"
+          if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
             echo "  Status:   AVAILABLE"
             echo "  Address:  $TAILSCALE_IP:3283"
-            echo "  Username: kaiden"
-            echo "  Password: amaalik1"
-            echo ""
-            echo "  Clients: Screens 5, Jump Desktop, Royal TSX"
           else
             echo "  Status:   NOT AVAILABLE"
           fi
+          echo "  Username: kaiden"
+          echo "  Password: amaalik1"
           echo ""
-          
-          echo "--------------------------------------------"
-          echo "VNC"
-          echo "--------------------------------------------"
-          if [ "$VNC_OK" = "true" ]; then
-            echo "  Status:   AVAILABLE"
-            echo "  Address:  vnc://$TAILSCALE_IP:5900"
-            echo "  Password: amaalik1"
-          else
-            echo "  Status:   NOT AVAILABLE (macOS 15 SIP)"
-          fi
-          echo ""
-          
-          echo "--------------------------------------------"
-          echo "SSH (Always Works)"
-          echo "--------------------------------------------"
+          echo "============================================"
+          echo "💻 SSH (Always Works)"
+          echo "============================================"
           echo "  Command:  ssh kaiden@$TAILSCALE_IP"
           echo "  Password: amaalik1"
           echo ""
-          
           echo "============================================"
           echo "CREDENTIALS"
           echo "============================================"
@@ -241,13 +267,19 @@ jobs:
             echo "[$(date)] === Health Check ==="
             echo "Tailscale IP: $TAILSCALE_IP"
             
+            # Check RustDesk
+            if pgrep -x "RustDesk" > /dev/null; then
+              echo "[OK] RustDesk running"
+            else
+              echo "[WARN] RustDesk not running, restarting..."
+              open -a RustDesk &
+            fi
+            
             # Check ARD
             if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
               echo "[OK] ARD running on 3283"
             else
-              echo "[WARN] ARD not running, restarting..."
-              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-                -restart -agent 2>/dev/null || true
+              echo "[INFO] ARD not available (macOS 15 restriction)"
             fi
             
             # Keep system awake
