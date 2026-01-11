@@ -1,4 +1,4 @@
-name: macOS Beta Test
+name: macOS beta
 
 on:
   workflow_dispatch:
@@ -27,6 +27,9 @@ jobs:
           sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
           
           sudo createhomedir -c -u kaiden
+          
+          # Ensure proper ownership of home directory
+          sudo chown -R kaiden:staff /Users/kaiden
           
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           sudo chmod 440 /etc/sudoers.d/kaiden
@@ -60,7 +63,6 @@ jobs:
             echo "Detected display ID: $DISPLAY_ID"
             echo "Setting resolution to 1280x720 @ 60Hz with color_depth:7..."
             
-            # Use color_depth:7 which is available on GitHub runners
             displayplacer "id:$DISPLAY_ID res:1280x720 hz:60 color_depth:7 scaling:off" 2>/dev/null || \
             displayplacer "id:$DISPLAY_ID res:1024x768 hz:60 color_depth:7 scaling:off" 2>/dev/null || \
             echo "Resolution change failed, using default"
@@ -72,7 +74,6 @@ jobs:
 
       - name: Reduce macOS Visual Effects (Reduce Lag)
         run: |
-          # Disable animations and transparency for better remote performance
           defaults write NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false
           defaults write NSGlobalDomain NSWindowResizeTime -float 0.001
           defaults write com.apple.dock autohide-time-modifier -float 0
@@ -83,10 +84,8 @@ jobs:
           defaults write com.apple.universalaccess reduceMotion -bool true
           defaults write com.apple.universalaccess reduceTransparency -bool true
           
-          # Set a solid color background (reduces rendering)
           osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Solid Colors/Black.png"' 2>/dev/null || true
           
-          # Restart Dock to apply
           killall Dock 2>/dev/null || true
 
       - name: Install and Configure RustDesk (Fast Remote Desktop)
@@ -94,28 +93,24 @@ jobs:
           echo "=== Installing RustDesk ==="
           brew install --cask rustdesk
           
-          # Wait for installation
           sleep 3
           
-          # Create RustDesk config directory
-          mkdir -p /Users/kaiden/Library/Application\ Support/RustDesk/config
+          # FIX: Create directory with sudo and proper ownership
+          sudo mkdir -p "/Users/kaiden/Library/Application Support/RustDesk/config"
+          sudo chown -R kaiden:staff "/Users/kaiden/Library"
           
-          # Set a permanent password for RustDesk
           RUSTDESK_APP="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
-          # Start RustDesk in background
           echo "Starting RustDesk..."
           open -a RustDesk
           sleep 5
           
-          # Set the password via command line
           "$RUSTDESK_APP" --password amaalik1 2>/dev/null || true
           
           sleep 3
           
           echo ""
           echo "=== RustDesk Status ==="
-          # Get RustDesk ID
           RUSTDESK_ID=$("$RUSTDESK_APP" --get-id 2>/dev/null || echo "Check GUI")
           echo "RustDesk ID: $RUSTDESK_ID"
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
@@ -156,18 +151,12 @@ jobs:
 
       - name: Optimize Network for Remote Desktop
         run: |
-          # Increase TCP buffer sizes for better throughput
           sudo sysctl -w net.inet.tcp.sendspace=2097152 || true
           sudo sysctl -w net.inet.tcp.recvspace=2097152 || true
-          # Disable delayed ACK for lower latency
           sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
-          # Optimize MSS
           sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
-          # Increase connection queue
           sudo sysctl -w kern.ipc.somaxconn=8192 || true
-          # Disable power saving that can cause lag
           sudo pmset -a displaysleep 0 sleep 0 disksleep 0 || true
-          # Disable App Nap (causes lag in background apps)
           defaults write NSGlobalDomain NSAppSleepDisabled -bool YES
 
       - name: Install Firefox and Create Shortcuts
@@ -212,7 +201,6 @@ jobs:
 
       - name: Display Connection Info
         run: |
-          # Get RustDesk ID
           RUSTDESK_APP="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           RUSTDESK_ID=$("$RUSTDESK_APP" --get-id 2>/dev/null || echo "Check RustDesk GUI on desktop")
           
@@ -251,13 +239,6 @@ jobs:
           echo "============================================"
           echo "  Command:  ssh kaiden@$TAILSCALE_IP"
           echo "  Password: amaalik1"
-          echo ""
-          echo "============================================"
-          echo "CREDENTIALS"
-          echo "============================================"
-          echo "  Username: kaiden"
-          echo "  Password: amaalik1"
-          echo "  Sudo:     No password required"
           echo "============================================"
 
       - name: Keep Alive
@@ -267,7 +248,6 @@ jobs:
             echo "[$(date)] === Health Check ==="
             echo "Tailscale IP: $TAILSCALE_IP"
             
-            # Check RustDesk
             if pgrep -x "RustDesk" > /dev/null; then
               echo "[OK] RustDesk running"
             else
@@ -275,14 +255,12 @@ jobs:
               open -a RustDesk &
             fi
             
-            # Check ARD
             if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
               echo "[OK] ARD running on 3283"
             else
               echo "[INFO] ARD not available (macOS 15 restriction)"
             fi
             
-            # Keep system awake
             caffeinate -u -t 60 &
             sleep 300
           done
