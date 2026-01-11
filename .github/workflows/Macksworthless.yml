@@ -1,0 +1,146 @@
+name: macOS Remote Environment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-remote:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    env:
+      USER_PASS: "amaalik1"
+      USER_NAME: "kaiden"
+
+    steps:
+      - name: System Info & Cleanup
+        run: |
+          sw_vers
+          echo "Cleaning up pre-installed tools to free space..."
+          sudo rm -rf /Applications/Xcode.app 2>/dev/null || true
+
+      - name: Create User (Sysadminctl Method)
+        run: |
+          # Modern macOS user creation
+          sudo sysadminctl -addUser $USER_NAME -fullName "Kaiden" -password "$USER_PASS" -admin
+          
+          # Force ownership (Just in case)
+          sudo createhomedir -c -u $USER_NAME || true
+          sudo chown -R $USER_NAME:staff /Users/$USER_NAME
+          
+          # Add to critical groups
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership $USER_NAME
+          
+          # Sudoers setup
+          echo "$USER_NAME ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER_NAME
+          sudo chmod 440 /etc/sudoers.d/$USER_NAME
+
+      - name: Optimize UI & Performance
+        run: |
+          # Disable heavy animations
+          defaults write NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false
+          defaults write NSGlobalDomain NSWindowResizeTime -float 0.001
+          defaults write com.apple.dock launchanim -bool false
+          defaults write com.apple.finder DisableAllAnimations -bool true
+          
+          # Network tuning
+          sudo sysctl -w net.inet.tcp.delayed_ack=0
+          sudo sysctl -w net.inet.tcp.sendspace=1048576
+          sudo sysctl -w net.inet.tcp.recvspace=1048576
+
+      - name: Configure ARD/VNC (Native Remote Desktop)
+        run: |
+          echo "Configuring Apple Remote Desktop..."
+          
+          # Set VNC Password
+          echo "$USER_PASS" | sudo perl -we '
+            $pw = <STDIN>; chomp $pw;
+            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
+            @p = unpack "C*", $pw;
+            foreach (0..length($pw)-1) { $p[$_] ^= $k[$_]; }
+            print pack "C*", @p;
+          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          
+          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
+
+          # Activate Kickstart
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw "$USER_PASS" \
+            -restart -agent -privs -all
+
+      - name: Install & Configure Tailscale
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          brew install tailscale
+          
+          # Create state directories
+          sudo mkdir -p /var/lib/tailscale /var/run/tailscale
+          
+          # Start Daemon in background
+          TS_BIN=$(brew --prefix tailscale)/bin
+          
+          sudo "$TS_BIN/tailscaled" \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock &
+          
+          echo "Waiting for Tailscale daemon..."
+          sleep 10
+          
+          sudo "$TS_BIN/tailscale" up --authkey="$TS_KEY" --hostname="macos-action-runner" --ssh
+          
+          TS_IP=$(sudo "$TS_BIN/tailscale" ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Install & Configure RustDesk
+        run: |
+          brew install --cask rustdesk
+          
+          # Launch once to generate config files
+          open -a RustDesk
+          sleep 10
+          
+          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          
+          # Attempt to set password via CLI (May fail on some versions, but worth trying)
+          "$RUSTDESK_BIN" --password "$USER_PASS" || true
+          
+          # Get ID
+          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id)
+          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+
+      - name: Display Connection Credentials
+        run: |
+          echo "✅ ENVIRONMENT READY"
+          echo "---------------------------------------------------"
+          echo "🌍 Tailscale IP: $TAILSCALE_IP"
+          echo "---------------------------------------------------"
+          echo "🦀 RUSTDESK DETAILS"
+          echo "   ID:       $RUSTDESK_ID"
+          echo "   Password: $USER_PASS"
+          echo "---------------------------------------------------"
+          echo "🍎 NATIVE VNC / ARD"
+          echo "   Address:  $TAILSCALE_IP"
+          echo "   User:     $USER_NAME"
+          echo "   Password: $USER_PASS"
+          echo "---------------------------------------------------"
+          echo "💻 SSH ACCESS"
+          echo "   Command:  ssh $USER_NAME@$TAILSCALE_IP"
+          echo "   Password: $USER_PASS"
+          echo "---------------------------------------------------"
+
+      - name: Keep Alive Loop
+        run: |
+          # Prevent sleep
+          sudo pmset -a displaysleep 0 sleep 0 disksleep 0
+          
+          echo "Entering keep-alive loop..."
+          while true; do
+            # Check if RustDesk is running, if not, relaunch
+            if ! pgrep -x "RustDesk" > /dev/null; then
+              echo "RustDesk died, restarting..."
+              open -a RustDesk
+            fi
+            sleep 60
+          done
