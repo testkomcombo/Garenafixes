@@ -1,0 +1,256 @@
+name: macOS Testing Beta
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Get macOS Version
+        run: sw_vers
+
+      - name: Create User with Full Admin
+        run: |
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "amaalik1"
+          
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo dscl . -append /Groups/wheel GroupMembership kaiden
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          
+          sudo createhomedir -c -u kaiden
+          
+          echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
+          sudo chmod 440 /etc/sudoers.d/kaiden
+
+      - name: Fix TCC Permissions
+        run: |
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+
+      - name: Set Resolution
+        run: |
+          brew install displayplacer
+          
+          echo "=== Detecting display ID ==="
+          DISPLAY_ID=$(displayplacer list 2>/dev/null | grep -E "^Persistent screen id:" | head -1 | sed 's/Persistent screen id: //')
+          
+          if [ -n "$DISPLAY_ID" ]; then
+            echo "Detected display ID: $DISPLAY_ID"
+            echo "Setting resolution to 1280x720 @ 60Hz..."
+            displayplacer "id:$DISPLAY_ID res:1280x720 hz:60 color_depth:4" || displayplacer "id:1 res:1280x720 hz:60 color_depth:4" 2>/dev/null || true
+          else
+            displayplacer "id:1 res:1280x720 hz:60 color_depth:4" 2>/dev/null || true
+          fi
+          
+          displayplacer list 2>/dev/null || true
+
+      - name: Start VNC via ARD Kickstart
+        run: |
+          echo "=== Configuring Apple Remote Desktop with VNC ==="
+          
+          echo "amaalik1" | sudo perl -we '
+            $pw = <STDIN>;
+            chomp $pw;
+            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
+            @p = unpack "C*", $pw;
+            foreach (0..length($pw)-1) {
+              $p[$_] ^= $k[$_];
+            }
+            print pack "C*", @p;
+          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null || true
+          
+          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
+          
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw amaalik1 \
+            -clientopts -setreqperm -reqperm no \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+          
+          sleep 3
+          
+          echo "=== Port status ==="
+          lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null || echo "VNC not listening"
+          lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null || echo "ARD not listening"
+
+      - name: Optimize Network for Remote Desktop
+        run: |
+          # Increase TCP buffer sizes for better throughput
+          sudo sysctl -w net.inet.tcp.sendspace=2097152 || true
+          sudo sysctl -w net.inet.tcp.recvspace=2097152 || true
+          # Disable delayed ACK for lower latency
+          sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
+          # Optimize MSS
+          sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
+          # Increase connection queue
+          sudo sysctl -w kern.ipc.somaxconn=8192 || true
+          # Disable power saving that can cause lag
+          sudo pmset -a displaysleep 0 sleep 0 disksleep 0 || true
+
+      - name: Install Firefox and Create Shortcuts
+        run: |
+          brew install --cask firefox 2>/dev/null || true
+          
+          sudo mkdir -p /Users/kaiden/Desktop
+          sudo ln -sf "/Applications/Firefox.app" "/Users/kaiden/Desktop/Firefox" 2>/dev/null || true
+          sudo ln -sf "/Applications/Safari.app" "/Users/kaiden/Desktop/Safari" 2>/dev/null || true
+          sudo chown -R kaiden:staff /Users/kaiden/Desktop
+
+      - name: Install Tailscale
+        run: brew install tailscale
+
+      - name: Start Tailscale
+        run: |
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tailscaled.log 2>&1 &
+          
+          sleep 8
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=macos-runner-${{ github.run_id }}
+          
+          sleep 5
+          
+          TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=== Tailscale Network Diagnostics ==="
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock netcheck || true
+
+      - name: Final Check and Status
+        run: |
+          echo ""
+          echo "============================================"
+          echo "       FINAL REMOTE ACCESS STATUS           "
+          echo "============================================"
+          echo ""
+          
+          echo "=== VNC Status ==="
+          if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+            echo "[OK] VNC running on port 5900"
+          else
+            echo "[INFO] VNC 5900 not available (macOS 15 SIP restriction)"
+          fi
+          
+          echo ""
+          echo "=== ARD Status ==="
+          if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+            echo "[OK] ARD running on port 3283"
+            lsof -iTCP:3283 -sTCP:LISTEN
+          else
+            echo "[WARN] ARD not listening on 3283"
+          fi
+          
+          echo ""
+          echo "=== All Listening Ports ==="
+          lsof -i -P 2>/dev/null | grep LISTEN | head -20
+
+      - name: Display Connection Info
+        run: |
+          echo ""
+          echo "============================================"
+          echo "        macOS REMOTE ACCESS                 "
+          echo "============================================"
+          echo ""
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo ""
+          
+          VNC_OK=false
+          ARD_OK=false
+          
+          lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN && VNC_OK=true
+          lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN && ARD_OK=true
+          
+          echo "--------------------------------------------"
+          echo "ARD (Apple Remote Desktop) - RECOMMENDED"
+          echo "--------------------------------------------"
+          if [ "$ARD_OK" = "true" ]; then
+            echo "  Status:   AVAILABLE"
+            echo "  Address:  $TAILSCALE_IP:3283"
+            echo "  Username: kaiden"
+            echo "  Password: amaalik1"
+            echo ""
+            echo "  Clients: Screens 5, Jump Desktop, Royal TSX"
+          else
+            echo "  Status:   NOT AVAILABLE"
+          fi
+          echo ""
+          
+          echo "--------------------------------------------"
+          echo "VNC"
+          echo "--------------------------------------------"
+          if [ "$VNC_OK" = "true" ]; then
+            echo "  Status:   AVAILABLE"
+            echo "  Address:  vnc://$TAILSCALE_IP:5900"
+            echo "  Password: amaalik1"
+          else
+            echo "  Status:   NOT AVAILABLE (macOS 15 SIP)"
+          fi
+          echo ""
+          
+          echo "--------------------------------------------"
+          echo "SSH (Always Works)"
+          echo "--------------------------------------------"
+          echo "  Command:  ssh kaiden@$TAILSCALE_IP"
+          echo "  Password: amaalik1"
+          echo ""
+          
+          echo "============================================"
+          echo "CREDENTIALS"
+          echo "============================================"
+          echo "  Username: kaiden"
+          echo "  Password: amaalik1"
+          echo "  Sudo:     No password required"
+          echo "============================================"
+
+      - name: Keep Alive
+        run: |
+          while true; do
+            echo ""
+            echo "[$(date)] === Health Check ==="
+            echo "Tailscale IP: $TAILSCALE_IP"
+            
+            # Check ARD
+            if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              echo "[OK] ARD running on 3283"
+            else
+              echo "[WARN] ARD not running, restarting..."
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+                -restart -agent 2>/dev/null || true
+            fi
+            
+            # Keep system awake
+            caffeinate -u -t 60 &
+            sleep 300
+          done
