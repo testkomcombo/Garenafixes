@@ -1,4 +1,4 @@
-name: macOS beta
+name: macOS beta 2
 
 on:
   workflow_dispatch:
