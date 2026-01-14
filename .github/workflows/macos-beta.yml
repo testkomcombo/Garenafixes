@@ -34,22 +34,33 @@ jobs:
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           sudo chmod 440 /etc/sudoers.d/kaiden
 
-      - name: Fix TCC Permissions
+      - name: Fix TCC Permissions with Database Reset
         run: |
+          # More comprehensive TCC permission handling
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          # Screen sharing permissions
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          # Backup existing database
+          sudo cp "$TCC_DB" "$TCC.db.backup" 2>/dev/null || true
           
-          # RustDesk permissions
+          # Reset ScreenCapture permissions for RustDesk and system components
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='com.carriez.RustDesk';" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='com.apple.screensharing.agent';" 2>/dev/null || true
+          
+          # Insert fresh permissions with explicit authorization
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          
+          # Ensure proper database permissions
+          sudo chown root:wheel "$TCC_DB"
+          sudo chmod 644 "$TCC_DB"
+          
+          # Restart relevant services
+          sudo killall -HUP screensharingd 2>/dev/null || true
+          sudo killall -HUP remoted 2>/dev/null || true
 
-      - name: Set Resolution (Fixed for available modes)
+      - name: Set Resolution and Color Depth
         run: |
           brew install displayplacer
           
@@ -61,10 +72,11 @@ jobs:
           if [ -n "$DISPLAY_ID" ]; then
             echo ""
             echo "Detected display ID: $DISPLAY_ID"
-            echo "Setting resolution to 1280x720 @ 60Hz with color_depth:7..."
+            echo "Setting resolution to 1920x1080 @ 60Hz with optimized color depth..."
             
-            displayplacer "id:$DISPLAY_ID res:1280x720 hz:60 color_depth:7 scaling:off" 2>/dev/null || \
-            displayplacer "id:$DISPLAY_ID res:1024x768 hz:60 color_depth:7 scaling:off" 2>/dev/null || \
+            # Try higher resolution first, then fallback
+            displayplacer "id:$DISPLAY_ID res:1920x1080 hz:60 color_depth:8 scaling:off" 2>/dev/null || \
+            displayplacer "id:$DISPLAY_ID res:1280x720 hz:60 color_depth:8 scaling:off" 2>/dev/null || \
             echo "Resolution change failed, using default"
           fi
           
@@ -72,23 +84,27 @@ jobs:
           echo "=== Final display configuration ==="
           displayplacer list 2>/dev/null || true
 
-      - name: Reduce macOS Visual Effects (Reduce Lag)
+      - name: Aggressively Reduce macOS Visual Effects
         run: |
+          # Disable all window animations
           defaults write NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false
           defaults write NSGlobalDomain NSWindowResizeTime -float 0.001
           defaults write com.apple.dock autohide-time-modifier -float 0
           defaults write com.apple.dock autohide-delay -float 0
-          defaults write com.apple.dock expose-animation-duration -float 0.1
+          defaults write com.apple.dock expose-animation-duration -float 0
           defaults write com.apple.dock launchanim -bool false
           defaults write com.apple.finder DisableAllAnimations -bool true
           defaults write com.apple.universalaccess reduceMotion -bool true
           defaults write com.apple.universalaccess reduceTransparency -bool true
           
+          # Set solid black background for maximum performance
           osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Solid Colors/Black.png"' 2>/dev/null || true
           
+          # Kill all affected applications to apply changes
           killall Dock 2>/dev/null || true
+          killall Finder 2>/dev/null || true
 
-      - name: Install and Configure RustDesk (Fast Remote Desktop)
+      - name: Install and Configure RustDesk with Performance Tuning
         run: |
           echo "=== Installing RustDesk ==="
           brew install --cask rustdesk
@@ -101,13 +117,34 @@ jobs:
           
           RUSTDESK_APP="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
-          echo "Starting RustDesk..."
+          echo "Starting RustDesk with performance optimizations..."
           open -a RustDesk
           sleep 5
           
+          # Set password and configure for performance
           "$RUSTDESK_APP" --password amaalik1 2>/dev/null || true
           
           sleep 3
+          
+          # Create performance configuration
+          mkdir -p "/Users/kaiden/Library/Application Support/RustDesk/config"
+          cat > "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml" << 'EOF'
+          [options]
+          # Performance optimizations
+          enable-abd = false
+          enable-direct-access = true
+          enable-audio = false
+          enable-clipboard = true
+          enable-file-transfer = true
+          enable-remote-config = false
+          # Codec settings for better performance
+          video-codec = "h264"
+          image-quality = 80
+          custom-fps = 30
+          EOF
+          
+          # Ensure proper ownership
+          chown -R kaiden:staff "/Users/kaiden/Library/Application Support/RustDesk"
           
           echo ""
           echo "=== RustDesk Status ==="
@@ -115,7 +152,7 @@ jobs:
           echo "RustDesk ID: $RUSTDESK_ID"
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
 
-      - name: Start VNC via ARD Kickstart (Backup)
+      - name: Start VNC via ARD Kickstart (Backup) with Optimizations
         run: |
           echo "=== Configuring Apple Remote Desktop with VNC ==="
           
@@ -132,9 +169,12 @@ jobs:
           
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
+          # Additional ARD optimizations
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          # Reduce encryption overhead for performance
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement EncryptAllData -bool false
           
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
@@ -149,15 +189,23 @@ jobs:
           
           sleep 3
 
-      - name: Optimize Network for Remote Desktop
+      - name: Aggressively Optimize Network for Remote Desktop
         run: |
-          sudo sysctl -w net.inet.tcp.sendspace=2097152 || true
-          sudo sysctl -w net.inet.tcp.recvspace=2097152 || true
+          # TCP buffer sizing for high-latency connections
+          sudo sysctl -w net.inet.tcp.sendspace=4194304 || true
+          sudo sysctl -w net.inet.tcp.recvspace=4194304 || true
+          # Disable delayed ACK for lower latency
           sudo sysctl -w net.inet.tcp.delayed_ack=0 || true
+          # Optimize for high-throughput, high-latency connections
           sudo sysctl -w net.inet.tcp.mssdflt=1460 || true
+          # Increase connection queue
           sudo sysctl -w kern.ipc.somaxconn=8192 || true
+          # Disable sleep and power management
           sudo pmset -a displaysleep 0 sleep 0 disksleep 0 || true
           defaults write NSGlobalDomain NSAppSleepDisabled -bool YES
+          # Additional network optimizations
+          sudo sysctl -w net.inet.udp.recvspace=748000 || true
+          sudo sysctl -w net.inet.udp.maxdgram=65536 || true
 
       - name: Install Firefox and Create Shortcuts
         run: |
@@ -169,26 +217,33 @@ jobs:
           sudo ln -sf "/Applications/RustDesk.app" "/Users/kaiden/Desktop/RustDesk" 2>/dev/null || true
           sudo chown -R kaiden:staff /Users/kaiden/Desktop
 
-      - name: Install Tailscale
+      - name: Install and Configure Tailscale with Performance Tuning
         run: brew install tailscale
 
-      - name: Start Tailscale
+      - name: Start Tailscale with Optimizations
         run: |
           sudo mkdir -p /var/lib/tailscale
           sudo mkdir -p /var/run/tailscale
           
+          # Start tailscaled with performance optimizations
           sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
             --state=/var/lib/tailscale/tailscaled.state \
             --socket=/var/run/tailscale/tailscaled.sock \
+            --port=41641 \
+            --tun=userspace-networking \
             > /tmp/tailscaled.log 2>&1 &
           
           sleep 8
           
+          # Connect with performance optimizations
           sudo /opt/homebrew/opt/tailscale/bin/tailscale \
             --socket=/var/run/tailscale/tailscaled.sock \
             up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=macos-runner-${{ github.run_id }}
+            --hostname=macos-runner-${{ github.run_id }} \
+            --accept-routes \
+            --advertise-exit-node \
+            --ssh
           
           sleep 5
           
@@ -198,8 +253,12 @@ jobs:
           echo ""
           echo "=== Tailscale Network Diagnostics ==="
           sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock netcheck || true
+          
+          echo ""
+          echo "=== Tailscale Status ==="
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock status || true
 
-      - name: Display Connection Info
+      - name: Enhanced Connection Info with Troubleshooting
         run: |
           RUSTDESK_APP="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           RUSTDESK_ID=$("$RUSTDESK_APP" --get-id 2>/dev/null || echo "Check RustDesk GUI on desktop")
@@ -210,6 +269,8 @@ jobs:
           echo "============================================"
           echo ""
           echo "Tailscale IP: $TAILSCALE_IP"
+          echo "macOS Version: $(sw_vers -productVersion)"
+          echo "Display Resolution: $(displayplacer list 2>/dev/null | grep -A 5 'Persistent screen id' | grep 'Resolution' | head -1 | awk '{print $2}')"
           echo ""
           echo "============================================"
           echo "🦀 RUSTDESK (RECOMMENDED - FASTEST)"
@@ -222,6 +283,11 @@ jobs:
           echo "  2. Enter the ID above"
           echo "  3. Enter password: amaalik1"
           echo ""
+          echo "  Performance tips:"
+          echo "  - Use H.264 codec in RustDesk settings"
+          echo "  - Set quality to 80-90 for balance"
+          echo "  - Limit FPS to 30 for smoother experience"
+          echo ""
           echo "============================================"
           echo "🍎 ARD (Apple Remote Desktop) - BACKUP"
           echo "============================================"
@@ -229,7 +295,7 @@ jobs:
             echo "  Status:   AVAILABLE"
             echo "  Address:  $TAILSCALE_IP:3283"
           else
-            echo "  Status:   NOT AVAILABLE"
+            echo "  Status:   NOT AVAILABLE (may be blocked by macOS 15+)"
           fi
           echo "  Username: kaiden"
           echo "  Password: amaalik1"
@@ -239,27 +305,73 @@ jobs:
           echo "============================================"
           echo "  Command:  ssh kaiden@$TAILSCALE_IP"
           echo "  Password: amaalik1"
+          echo ""
+          echo "============================================"
+          echo "🔧 TROUBLESHOOTING TIPS"
+          echo "============================================"
+          echo "If RustDesk is slow or lagging:"
+          echo "1. Check Tailscale connection: sudo tailscale ping <your-ip>"
+          echo "2. Verify RustDesk permissions in System Settings > Privacy"
+          echo "3. Try reducing resolution to 1280x720"
+          echo "4. Disable file transfer in RustDesk settings"
+          echo "5. Use Ethernet instead of Wi-Fi if possible"
+          echo ""
           echo "============================================"
 
-      - name: Keep Alive
+      - name: Enhanced Keep Alive with Health Monitoring
         run: |
           while true; do
             echo ""
             echo "[$(date)] === Health Check ==="
             echo "Tailscale IP: $TAILSCALE_IP"
             
+            # Check RustDesk
             if pgrep -x "RustDesk" > /dev/null; then
               echo "[OK] RustDesk running"
+              # Check if RustDesk is listening on expected ports
+              if lsof -iTCP:21115-21119 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+                echo "[OK] RustDesk ports listening"
+              else
+                echo "[WARN] RustDesk ports not listening, restarting..."
+                pkill -x "RustDesk" && sleep 2 && open -a RustDesk &
+              fi
             else
               echo "[WARN] RustDesk not running, restarting..."
               open -a RustDesk &
             fi
             
+            # Check ARD
             if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
               echo "[OK] ARD running on 3283"
             else
-              echo "[INFO] ARD not available (macOS 15 restriction)"
+              echo "[INFO] ARD not available (may be normal on macOS 15+)"
             fi
+            
+            # Check Tailscale
+            if sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock status 2>/dev/null | grep -q "Healthy"; then
+              echo "[OK] Tailscale connection healthy"
+            else
+              echo "[WARN] Tailscale connection issue, restarting..."
+              sudo pkill - tailscaled && sleep 2 && sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+                --state=/var/lib/tailscale/tailscaled.state \
+                --socket=/var/run/tailscale/tailscaled.sock \
+                --port=41641 \
+                --tun=userspace-networking \
+                > /tmp/tailscaled.log 2>&1 &
+              sleep 5
+              sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+                --socket=/var/run/tailscale/tailscaled.sock \
+                up \
+                --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+                --hostname=macos-runner-${{ github.run_id }} \
+                --accept-routes \
+                --advertise-exit-node \
+                --ssh
+            fi
+            
+            # Check system resources
+            echo "CPU Usage: $(ps -A -o %cpu | awk '{s+=$1} END {print s}')%"
+            echo "Memory Usage: $(ps -A -o %mem | awk '{s+=$1} END {print s}')%"
             
             caffeinate -u -t 60 &
             sleep 300
