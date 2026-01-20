@@ -1,0 +1,285 @@
+name: macOS Remote Desktop mo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: System Info
+        run: |
+          echo "=== macOS Version ==="
+          sw_vers
+          echo ""
+          echo "=== Hardware ==="
+          sysctl -n machdep.cpu.brand_string
+          system_profiler SPHardwareDataType | grep -E "Memory|Cores"
+
+      - name: Create Admin User
+        run: |
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "kaiden123"
+          
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo dscl . -append /Groups/wheel GroupMembership kaiden
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          
+          sudo createhomedir -c -u kaiden
+          
+          echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
+          sudo chmod 440 /etc/sudoers.d/kaiden
+          
+          echo "✅ User 'kaiden' created with full admin access"
+
+      - name: Configure TCC Permissions
+        run: |
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          declare -a SERVICES=(
+            "kTCCServiceScreenCapture"
+            "kTCCServiceAccessibility"
+            "kTCCServicePostEvent"
+          )
+          
+          declare -a CLIENTS=(
+            "com.apple.screensharing.agent"
+            "com.apple.RemoteDesktop.agent"
+            "com.carriez.RustDesk"
+            "rustdesk"
+          )
+          
+          for service in "${SERVICES[@]}"; do
+            for client in "${CLIENTS[@]}"; do
+              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$service','$client',0,2,4,1);" 2>/dev/null || true
+            done
+          done
+          
+          echo "✅ TCC permissions configured"
+
+      - name: Install and Configure RustDesk
+        run: |
+          echo "=== Installing RustDesk ==="
+          brew install --cask rustdesk
+          
+          sleep 3
+          
+          RUSTDESK_APP="/Applications/RustDesk.app"
+          if [ -d "$RUSTDESK_APP" ]; then
+            echo "✅ RustDesk installed"
+          else
+            echo "❌ RustDesk installation failed"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=== Configuring RustDesk ==="
+          
+          RUSTDESK_CONFIG_DIR="$HOME/Library/Application Support/RustDesk"
+          sudo mkdir -p "$RUSTDESK_CONFIG_DIR"
+          
+          cat > /tmp/rustdesk.toml << 'EOF'
+          [options]
+          direct-server = "Y"
+          allow-auto-disconnect = "N"
+          enable-file-transfer = "Y"
+          EOF
+          
+          sudo cp /tmp/rustdesk.toml "$RUSTDESK_CONFIG_DIR/RustDesk.toml" 2>/dev/null || true
+          
+          echo ""
+          echo "=== Starting RustDesk ==="
+          open -a RustDesk
+          
+          sleep 5
+          
+          echo ""
+          echo "=== RustDesk Status ==="
+          if pgrep -x "RustDesk" > /dev/null; then
+            echo "✅ RustDesk is running"
+          else
+            echo "⚠️ RustDesk may need manual start"
+          fi
+
+      - name: Setup Apple VNC (Backup)
+        run: |
+          echo "=== Configuring Apple VNC as backup ==="
+          
+          echo "kaiden123" | sudo perl -we '
+            $pw = <STDIN>;
+            chomp $pw;
+            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
+            @p = unpack "C*", $pw;
+            foreach (0..length($pw)-1) {
+              $p[$_] ^= $k[$_];
+            }
+            print pack "C*", @p;
+          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          
+          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
+          
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw kaiden123 \
+            -clientopts -setreqperm -reqperm no \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+          
+          sleep 2
+          
+          if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+            echo "✅ Apple VNC running on port 5900 (backup)"
+          else
+            echo "⚠️ Apple VNC not available (macOS 15 restriction)"
+          fi
+
+      - name: Install Tailscale
+        run: |
+          echo "=== Installing Tailscale ==="
+          brew install tailscale
+          
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tailscaled.log 2>&1 &
+          
+          sleep 5
+          
+          sudo /opt/homebrew/opt/tailscale/bin/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=macos-rdp-${{ github.run_id }}
+          
+          sleep 3
+          
+          TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          
+          echo "✅ Tailscale connected: $TS_IP"
+
+      - name: Get RustDesk ID
+        run: |
+          sleep 5
+          
+          RUSTDESK_ID=""
+          
+          CONFIG_FILE="$HOME/Library/Application Support/RustDesk/RustDesk.toml"
+          if [ -f "$CONFIG_FILE" ]; then
+            RUSTDESK_ID=$(grep -E "^id\s*=" "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f2 | head -1)
+          fi
+          
+          if [ -z "$RUSTDESK_ID" ]; then
+            CONFIG_FILE2="/Users/kaiden/Library/Application Support/RustDesk/RustDesk.toml"
+            if [ -f "$CONFIG_FILE2" ]; then
+              RUSTDESK_ID=$(grep -E "^id\s*=" "$CONFIG_FILE2" 2>/dev/null | cut -d'"' -f2 | head -1)
+            fi
+          fi
+          
+          if [ -z "$RUSTDESK_ID" ]; then
+            RUSTDESK_ID=$(find /Users -name "RustDesk*.toml" -exec grep -l "id" {} \; 2>/dev/null | head -1 | xargs grep "^id" 2>/dev/null | cut -d'"' -f2)
+          fi
+          
+          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+
+      - name: Display Connection Info
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║           macOS REMOTE DESKTOP - CONNECTION INFO             ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "┌──────────────────────────────────────────────────────────────┐"
+          echo "│  CREDENTIALS                                                 │"
+          echo "├──────────────────────────────────────────────────────────────┤"
+          echo "│  Username: kaiden                                            │"
+          echo "│  Password: kaiden123                                         │"
+          echo "│  Tailscale IP: $TAILSCALE_IP"
+          echo "└──────────────────────────────────────────────────────────────┘"
+          echo ""
+          echo "┌──────────────────────────────────────────────────────────────┐"
+          echo "│  OPTION 1: RUSTDESK (RECOMMENDED - FAST)                     │"
+          echo "├──────────────────────────────────────────────────────────────┤"
+          echo "│  1. Download RustDesk: https://rustdesk.com/                 │"
+          echo "│  2. Enter this ID: $RUSTDESK_ID"
+          echo "│  3. Password: kaiden123                                      │"
+          echo "│                                                              │"
+          echo "│  OR connect via IP:                                          │"
+          echo "│  - Direct IP: $TAILSCALE_IP"
+          echo "└──────────────────────────────────────────────────────────────┘"
+          echo ""
+          echo "┌──────────────────────────────────────────────────────────────┐"
+          echo "│  OPTION 2: APPLE VNC (BACKUP - SLOWER)                       │"
+          echo "├──────────────────────────────────────────────────────────────┤"
+          echo "│  Address: vnc://$TAILSCALE_IP:5900"
+          echo "│  Password: kaiden123                                         │"
+          echo "│                                                              │"
+          echo "│  For best VNC performance, use these clients:                │"
+          echo "│  - macOS: Screens 5 or Jump Desktop                          │"
+          echo "│  - Windows: TightVNC or RealVNC Viewer                       │"
+          echo "│  - Set quality to 'Fast' or 'Low' in client settings         │"
+          echo "└──────────────────────────────────────────────────────────────┘"
+          echo ""
+          echo "┌──────────────────────────────────────────────────────────────┐"
+          echo "│  OPTION 3: SSH                                               │"
+          echo "├──────────────────────────────────────────────────────────────┤"
+          echo "│  ssh kaiden@$TAILSCALE_IP"
+          echo "│  Password: kaiden123                                         │"
+          echo "└──────────────────────────────────────────────────────────────┘"
+          echo ""
+
+      - name: Keep Alive
+        run: |
+          echo "Session started at $(date)"
+          echo "Monitoring services..."
+          echo ""
+          
+          check_interval=300
+          
+          while true; do
+            echo "[$(date '+%H:%M:%S')] Health Check"
+            
+            if pgrep -x "RustDesk" > /dev/null; then
+              echo "  ✅ RustDesk: Running"
+            else
+              echo "  ⚠️ RustDesk: Restarting..."
+              open -a RustDesk 2>/dev/null || true
+            fi
+            
+            if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              echo "  ✅ VNC: Running on 5900"
+            else
+              echo "  ⚠️ VNC: Not available"
+            fi
+            
+            if pgrep -f tailscaled > /dev/null; then
+              echo "  ✅ Tailscale: Connected ($TAILSCALE_IP)"
+            else
+              echo "  ⚠️ Tailscale: Reconnecting..."
+              sudo /opt/homebrew/opt/tailscale/bin/tailscaled \
+                --state=/var/lib/tailscale/tailscaled.state \
+                --socket=/var/run/tailscale/tailscaled.sock &
+            fi
+            
+            echo ""
+            
+            caffeinate -u -t 60 &
+            sleep $check_interval
+          done
