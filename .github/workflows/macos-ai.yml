@@ -37,32 +37,33 @@ jobs:
           
           echo "✅ User 'kaiden' created"
 
-      - name: Configure TCC Permissions
+      - name: Configure TCC Permissions (Comprehensive)
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          USER_TCC_DB="/Users/runner/Library/Application Support/com.apple.TCC/TCC.db"
           
-          CLIENTS=(
-            "com.apple.screensharing.agent"
-            "com.apple.RemoteDesktop.agent"
-            "com.carriez.RustDesk"
-            "/Applications/RustDesk.app"
-            "/Applications/RustDesk.app/Contents/MacOS/RustDesk"
-          )
+          echo "=== System TCC Database ==="
           
-          SERVICES=(
-            "kTCCServiceScreenCapture"
-            "kTCCServiceAccessibility"
-            "kTCCServicePostEvent"
-            "kTCCServiceListenEvent"
-          )
+          BUNDLE_ID="com.carriez.RustDesk"
           
-          for client in "${CLIENTS[@]}"; do
-            for service in "${SERVICES[@]}"; do
-              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$service','$client',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='$BUNDLE_ID';" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$BUNDLE_ID', 0, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$BUNDLE_ID', 0, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServicePostEvent', '$BUNDLE_ID', 0, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>/dev/null || true
+          
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceListenEvent', '$BUNDLE_ID', 0, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>/dev/null || true
+          
+          for client in "com.apple.screensharing.agent" "com.apple.RemoteDesktop.agent"; do
+            for service in "kTCCServiceScreenCapture" "kTCCServiceAccessibility" "kTCCServicePostEvent"; do
+              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('$service', '$client', 0, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>/dev/null || true
             done
           done
           
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,flags) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1,0,0);" 2>/dev/null || true
+          echo "=== Verifying TCC entries ==="
+          sudo sqlite3 "$TCC_DB" "SELECT service, client, auth_value FROM access WHERE client LIKE '%RustDesk%' OR client LIKE '%carriez%';" 2>/dev/null || echo "Could not query TCC"
           
           echo "✅ TCC permissions configured"
 
@@ -80,97 +81,105 @@ jobs:
           MOUNT=$(find /Volumes -maxdepth 1 -iname "*rustdesk*" | head -1)
           sudo cp -R "$MOUNT/RustDesk.app" /Applications/
           hdiutil detach "$MOUNT" -quiet 2>/dev/null || true
+          
           sudo xattr -cr /Applications/RustDesk.app
+          sudo xattr -d com.apple.quarantine /Applications/RustDesk.app 2>/dev/null || true
+          
+          sudo codesign --force --deep --sign - /Applications/RustDesk.app 2>/dev/null || true
           
           echo "✅ RustDesk installed"
 
-      - name: Configure RustDesk Password
+      - name: Create GUI Session
+        run: |
+          echo "=== Enabling auto-login for kaiden ==="
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
+          
+          echo "=== Starting GUI session ==="
+          sudo launchctl bootshell || true
+          
+          echo "=== Checking WindowServer ==="
+          pgrep -l WindowServer || echo "WindowServer not running (expected in CI)"
+          
+          echo "=== Current display info ==="
+          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
+
+      - name: Configure and Start RustDesk Service
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
-          CONFIG_DIR="/Users/runner/Library/Preferences/com.carriez.RustDesk"
           
-          echo "=== Starting RustDesk first time to generate config ==="
-          open /Applications/RustDesk.app
-          sleep 8
-          
-          echo "=== Setting password with sudo ==="
-          sudo "$RUSTDESK_BIN" --password kaiden123 || true
-          sleep 2
-          
-          echo "=== Trying alternative password method ==="
-          if [ -d "$CONFIG_DIR" ]; then
-            echo "Config directory exists: $CONFIG_DIR"
-            ls -la "$CONFIG_DIR/"
-            
-            if [ -f "$CONFIG_DIR/RustDesk2.toml" ]; then
-              echo ""
-              echo "=== Current RustDesk2.toml ==="
-              cat "$CONFIG_DIR/RustDesk2.toml"
-            fi
-          fi
-          
-          echo ""
-          echo "=== Setting password via service command ==="
+          echo "=== Starting RustDesk service with sudo ==="
           sudo "$RUSTDESK_BIN" --service &
-          sleep 3
+          SERVICE_PID=$!
+          echo "Service PID: $SERVICE_PID"
+          sleep 5
+          
+          echo "=== Setting password ==="
           sudo "$RUSTDESK_BIN" --password kaiden123
           sleep 2
           
-          pkill -f "RustDesk.*service" 2>/dev/null || true
+          echo "=== Getting ID ==="
+          RUSTDESK_ID=$(sudo "$RUSTDESK_BIN" --get-id 2>/dev/null || echo "")
+          echo "RustDesk ID: $RUSTDESK_ID"
+          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+          
+          echo "=== Checking config ==="
+          CONFIG_DIR="/var/root/Library/Preferences/com.carriez.RustDesk"
+          if [ -d "$CONFIG_DIR" ]; then
+            echo "Root config exists"
+            ls -la "$CONFIG_DIR/" 2>/dev/null || true
+          fi
+          
+          CONFIG_DIR2="/Users/runner/Library/Preferences/com.carriez.RustDesk"
+          if [ -d "$CONFIG_DIR2" ]; then
+            echo "Runner config:"
+            cat "$CONFIG_DIR2/RustDesk2.toml" 2>/dev/null || true
+          fi
           
           echo ""
-          echo "=== Restarting RustDesk ==="
+          echo "=== Stopping service, starting GUI app ==="
+          sudo pkill -f "RustDesk.*service" 2>/dev/null || true
+          sleep 2
+          
+          echo "=== Starting RustDesk GUI ==="
+          open /Applications/RustDesk.app
+          sleep 5
+          
+          if pgrep -f "RustDesk" > /dev/null; then
+            echo "✅ RustDesk is running"
+          else
+            echo "⚠️ RustDesk not detected, trying again..."
+            open /Applications/RustDesk.app
+            sleep 3
+          fi
+
+      - name: Grant Screen Recording via Accessibility
+        run: |
+          echo "=== Attempting to enable screen recording ==="
+          
+          RUSTDESK_PATH="/Applications/RustDesk.app"
+          
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,strftime('%s','now'));" 2>/dev/null || true
+          
+          sudo tccutil reset ScreenCapture com.carriez.RustDesk 2>/dev/null || true
+          
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "UPDATE access SET auth_value=2 WHERE client='com.carriez.RustDesk' AND service='kTCCServiceScreenCapture';" 2>/dev/null || true
+          
+          echo "=== Restarting RustDesk after permission change ==="
           pkill -f RustDesk 2>/dev/null || true
           sleep 2
           open /Applications/RustDesk.app
           sleep 5
+          
+          echo "=== Final TCC check ==="
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "SELECT service, client, auth_value FROM access WHERE client LIKE '%carriez%';" 2>/dev/null || true
 
-      - name: Get RustDesk ID and Verify
+      - name: Setup Apple VNC (Working Backup)
         run: |
-          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          echo "=== Configuring Apple Screen Sharing ==="
           
-          echo "=== Getting RustDesk ID ==="
-          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>/dev/null || echo "")
-          
-          if [ -z "$RUSTDESK_ID" ]; then
-            sleep 3
-            RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>/dev/null || echo "")
-          fi
-          
-          if [ -z "$RUSTDESK_ID" ]; then
-            CONFIG_DIR="/Users/runner/Library/Preferences/com.carriez.RustDesk"
-            if [ -f "$CONFIG_DIR/RustDesk2.toml" ]; then
-              RUSTDESK_ID=$(grep -E "^id\s*=" "$CONFIG_DIR/RustDesk2.toml" | sed "s/id *= *//" | tr -d "'" | tr -d '"')
-            fi
-          fi
-          
-          echo "RustDesk ID: $RUSTDESK_ID"
-          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
-          
-          echo ""
-          echo "=== Checking if password is set ==="
-          CONFIG_DIR="/Users/runner/Library/Preferences/com.carriez.RustDesk"
-          if [ -f "$CONFIG_DIR/RustDesk2.toml" ]; then
-            if grep -q "password" "$CONFIG_DIR/RustDesk2.toml"; then
-              echo "✅ Password appears to be configured"
-            else
-              echo "⚠️ Password may not be set in config"
-            fi
-            echo ""
-            echo "=== Config contents ==="
-            cat "$CONFIG_DIR/RustDesk2.toml" 2>/dev/null || true
-          fi
-          
-          echo ""
-          if pgrep -f "RustDesk" > /dev/null; then
-            echo "✅ RustDesk is running"
-          else
-            echo "⚠️ RustDesk not running, starting..."
-            open /Applications/RustDesk.app
-          fi
-
-      - name: Setup Apple VNC (Backup)
-        run: |
           echo "kaiden123" | sudo perl -we '
             $pw = <STDIN>; chomp $pw;
             @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
@@ -188,12 +197,14 @@ jobs:
             -allowAccessFor -allUsers \
             -restart -agent -menu 2>/dev/null || true
           
+          sleep 2
+          
           if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
             echo "VNC_AVAILABLE=true" >> $GITHUB_ENV
-            echo "✅ VNC on port 5900"
+            echo "✅ VNC running on 5900"
           else
             echo "VNC_AVAILABLE=false" >> $GITHUB_ENV
-            echo "⚠️ VNC not available (macOS 15)"
+            echo "⚠️ VNC not available"
           fi
 
       - name: Install Tailscale
@@ -229,24 +240,24 @@ jobs:
           echo "  Password:     kaiden123"
           echo ""
           echo "┌──────────────────────────────────────────────────────────────┐"
-          echo "│  RUSTDESK (Fast)                                             │"
+          echo "│  RUSTDESK                                                    │"
           echo "├──────────────────────────────────────────────────────────────┤"
-          echo "│  Download: https://rustdesk.com                              │"
           echo "│  ID: $RUSTDESK_ID"
           echo "│  Password: kaiden123                                         │"
           echo "│                                                              │"
-          echo "│  Or connect via Tailscale IP: $TAILSCALE_IP"
+          echo "│  If black screen, use VNC instead (it works!)                │"
           echo "└──────────────────────────────────────────────────────────────┘"
           echo ""
-          if [ "$VNC_AVAILABLE" = "true" ]; then
           echo "┌──────────────────────────────────────────────────────────────┐"
-          echo "│  VNC (Backup - Slower)                                       │"
+          echo "│  VNC (Use this if RustDesk shows black screen)               │"
           echo "├──────────────────────────────────────────────────────────────┤"
-          echo "│  vnc://$TAILSCALE_IP:5900"
+          echo "│  Address: vnc://$TAILSCALE_IP"
           echo "│  Password: kaiden123                                         │"
+          echo "│                                                              │"
+          echo "│  On Mac: Open Finder > Go > Connect to Server                │"
+          echo "│  Enter: vnc://$TAILSCALE_IP"
           echo "└──────────────────────────────────────────────────────────────┘"
           echo ""
-          fi
           echo "┌──────────────────────────────────────────────────────────────┐"
           echo "│  SSH                                                         │"
           echo "├──────────────────────────────────────────────────────────────┤"
@@ -261,8 +272,20 @@ jobs:
           
           while true; do
             echo "[$(date '+%H:%M:%S')] Status:"
-            pgrep -f "RustDesk" > /dev/null && echo "  ✅ RustDesk" || { open /Applications/RustDesk.app 2>/dev/null; echo "  ⚠️ RustDesk restarted"; }
-            pgrep -f tailscaled > /dev/null && echo "  ✅ Tailscale ($TAILSCALE_IP)" || echo "  ❌ Tailscale"
+            
+            if pgrep -f "RustDesk" > /dev/null; then
+              echo "  ✅ RustDesk running"
+            else
+              echo "  ⚠️ RustDesk restarting..."
+              open /Applications/RustDesk.app 2>/dev/null || true
+            fi
+            
+            if pgrep -f tailscaled > /dev/null; then
+              echo "  ✅ Tailscale ($TAILSCALE_IP)"
+            else
+              echo "  ❌ Tailscale down"
+            fi
+            
             echo ""
             caffeinate -u -t 60 &
             sleep 300
