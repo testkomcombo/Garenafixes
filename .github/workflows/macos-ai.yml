@@ -21,7 +21,6 @@ jobs:
           USERNAME="kaiden"
           PASSWORD="kaiden123"
           
-          # Create user
           sudo dscl . -create /Users/$USERNAME
           sudo dscl . -create /Users/$USERNAME UserShell /bin/zsh
           sudo dscl . -create /Users/$USERNAME RealName "Kaiden"
@@ -29,18 +28,14 @@ jobs:
           sudo dscl . -create /Users/$USERNAME PrimaryGroupID 80
           sudo dscl . -create /Users/$USERNAME NFSHomeDirectory /Users/$USERNAME
           
-          # Set password
           sudo dscl . -passwd /Users/$USERNAME "$PASSWORD"
           
-          # Add to groups
           sudo dscl . -append /Groups/admin GroupMembership $USERNAME
           sudo dscl . -append /Groups/wheel GroupMembership $USERNAME
           sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership $USERNAME
           
-          # Create home directory
           sudo createhomedir -c -u $USERNAME
           
-          # Grant passwordless sudo
           echo "$USERNAME ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USERNAME
           sudo chmod 440 /etc/sudoers.d/$USERNAME
           
@@ -86,10 +81,8 @@ jobs:
           
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Enable Screen Sharing
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          # Configure ARD via kickstart
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure \
@@ -118,24 +111,14 @@ jobs:
             sleep 2
           done
 
-      - name: Install RustDesk
+      - name: Install RustDesk via Brew
         run: |
-          ARCH=$(uname -m)
-          if [ "$ARCH" = "arm64" ]; then
-            URL="https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-aarch64.dmg"
-          else
-            URL="https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-x86_64.dmg"
-          fi
+          echo "Installing latest RustDesk via Homebrew..."
+          brew install --cask rustdesk
           
-          curl -L -o /tmp/rustdesk.dmg "$URL"
-          
-          hdiutil attach /tmp/rustdesk.dmg -nobrowse -quiet
-          MOUNT=$(find /Volumes -maxdepth 1 -iname "*rustdesk*" | head -1)
-          
-          sudo cp -R "$MOUNT/RustDesk.app" /Applications/
-          hdiutil detach "$MOUNT" -quiet 2>/dev/null || true
+          # Remove quarantine to prevent Gatekeeper delays
           sudo xattr -cr /Applications/RustDesk.app
-          echo "✅ RustDesk installed"
+          echo "✅ RustDesk installed via Brew"
 
       - name: Configure RustDesk (System Log Debug)
         run: |
@@ -164,36 +147,48 @@ jobs:
           sleep 2
           
           echo "=== Starting System Log Monitor ==="
-          # macOS logs are not printed to stdout by RustDesk. We must capture the system log.
-          log stream --predicate 'process == "RustDesk"' --level debug > "$SYSLOG_FILE" 2>&1 &
+          # We filter out "NSWindow" and "AppKit" logs to see actual errors
+          log stream --predicate 'process == "RustDesk" AND (messageType == error OR message CONTAINS "ERROR" OR message CONTAINS "fail" OR message CONTAINS "Permission")' --level debug > "$SYSLOG_FILE" 2>&1 &
           LOG_PID=$!
           
-          echo "Log Monitor PID: $LOG_PID"
+          # Also capture standard logs in a separate file to see if it starts at all
+          log stream --predicate 'process == "RustDesk"' --level info > /tmp/rustdesk_all.log 2>&1 &
+          ALL_LOG_PID=$!
+          
+          echo "Log Monitor PIDs: $LOG_PID (Err), $ALL_LOG_PID (All)"
           
           echo "=== Starting RustDesk Service ==="
-          # Start service
           sudo "$RUSTDESK_BIN" --service &
           SERVICE_PID=$!
           
           echo "RustDesk PID: $SERVICE_PID"
-          echo "Waiting for logs (15s)..."
+          echo "Waiting for startup logs (20s)..."
           echo "---------------------------------------------------"
           
-          # Show live logs
-          for i in {1..15}; do
+          # Show logs periodically
+          for i in {1..20}; do
             if [ -f "$SYSLOG_FILE" ]; then
-              # Print new content
-              tail -n 20 "$SYSLOG_FILE"
+              # Show errors if any
+              ERR_CONTENT=$(cat "$SYSLOG_FILE" | tail -n 5)
+              if [ -n "$ERR_CONTENT" ]; then
+                echo "🔴 ERRORS FOUND (Second $i):"
+                echo "$ERR_CONTENT"
+              fi
+            fi
+            
+            # Print a generic status if no errors
+            if [ $((i % 5)) -eq 0 ]; then
+              echo "[$i/20s] Waiting for RustDesk..."
             fi
             sleep 1
           done
           
-          # Stop the log monitor
-          kill $LOG_PID 2>/dev/null || true
+          # Stop monitors
+          kill $LOG_PID $ALL_LOG_PID 2>/dev/null || true
           
           echo "---------------------------------------------------"
-          echo "=== FULL SYSTEM LOG DUMP (Last 50 lines) ==="
-          cat "$SYSLOG_FILE" | tail -50
+          echo "=== FULL LOG DUMP (Last 50 lines) ==="
+          cat /tmp/rustdesk_all.log | tail -50 | grep -v "found no value for key" | grep -v "Menu_Tracking" | grep -v "LaunchServices"
           
           echo ""
           echo "=== PROCESS STATUS ==="
@@ -242,7 +237,7 @@ jobs:
             Password:     kaiden123
 
           ┌──────────────────────────────────────────────────────────────┐
-          │  OPTION 1: APPLE REMOTE DESKTOP (WORKING)                   │
+          │  OPTION 1: APPLE REMOTE DESKTOP (RECOMMENDED)                 │
           ├──────────────────────────────────────────────────────────────┤
           EOF
           
@@ -261,11 +256,11 @@ jobs:
           └──────────────────────────────────────────────────────────────┘
 
           ┌──────────────────────────────────────────────────────────────┐
-          │  OPTION 2: RUSTDESK (Check System Logs above if fails)       │
+          │  OPTION 2: RUSTDESK (Latest Version via Brew)                 │
           ├──────────────────────────────────────────────────────────────┤
           │  ID: (See Logs)                                              │
           │  Password: kaiden123                                         │
-          │                                                              │"
+          │                                                              │
           │  Direct IP: $TAILSCALE_IP"
           └──────────────────────────────────────────────────────────────┘
 
