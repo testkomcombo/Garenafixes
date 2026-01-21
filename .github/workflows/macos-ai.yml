@@ -47,8 +47,6 @@ jobs:
           echo "✅ User '$USERNAME' created"
 
       - name: Configure TCC Permissions
-        # Note: Direct TCC modification often fails on runners due to SIP/locking.
-        # This is a "best effort" attempt.
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
@@ -138,29 +136,16 @@ jobs:
           sudo xattr -cr /Applications/RustDesk.app
           echo "✅ RustDesk installed"
 
-      - name: Configure RustDesk
+      - name: Configure RustDesk (Debug Mode)
         run: |
+          LOG_FILE="/tmp/rustdesk_debug.log"
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           CONFIG_DIR="$HOME/Library/Preferences/com.carriez.RustDesk"
+          
+          echo "=== Setup Environment ==="
           mkdir -p "$CONFIG_DIR"
           
-          # Start RustDesk service to generate ID
-          echo "Starting RustDesk service..."
-          sudo "$RUSTDESK_BIN" --service
-          sleep 10
-          
-          # Retrieve ID
-          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>/dev/null || echo "")
-          
-          # Fallback: Check config file if CLI fails
-          if [ -z "$RUSTDESK_ID" ]; then
-            RUSTDESK_ID=$(grep -E "^id\s*=" "$CONFIG_DIR/RustDesk2.toml" 2>/dev/null | sed "s/id *= *//" | tr -d "'" | tr -d '"')
-          fi
-          
-          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
-          echo "Detected ID: $RUSTDESK_ID"
-          
-          # Create config file
+          # Create config file before starting
           cat > /tmp/rustdesk2.toml << 'EOF'
           rendezvous_server = 'rs-ny.rustdesk.com'
           nat_type = 1
@@ -171,19 +156,57 @@ jobs:
           direct-access-port = '21118'
           EOF
           
-          # Apply config
           cp /tmp/rustdesk2.toml "$CONFIG_DIR/RustDesk2.toml" 2>/dev/null || true
-          sudo cp /tmp/rustdesk2.toml "/var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml" 2>/dev/null || true
           
-          # Restart to apply config
-          pkill -f RustDesk 2>/dev/null || true
+          echo "=== Cleaning previous instances ==="
+          pkill -9 -f RustDesk || true
           sleep 2
-          sudo "$RUSTDESK_BIN" --service &
-          sleep 5
           
-          # Attempt password set
-          echo "Setting password..."
-          sudo "$RUSTDESK_BIN" --password kaiden123 2>&1 || echo "Password set via CLI may have failed, try manual login."
+          echo "=== Starting RustDesk Service ==="
+          # Start in background, redirect ALL output to log file
+          sudo "$RUSTDESK_BIN" --service >> "$LOG_FILE" 2>&1 &
+          SERVICE_PID=$!
+          
+          echo "RustDesk Service PID: $SERVICE_PID"
+          echo "Waiting for startup logs (Max 30s)..."
+          echo "---------------------------------------------------"
+          
+          # Monitor loop
+          for i in {1..30}; do
+            # Check if process died
+            if ! kill -0 $SERVICE_PID 2>/dev/null; then
+              echo ""
+              echo "❌ PROCESS DIED PREMATURELY at second $i"
+              break
+            fi
+            
+            # Print latest logs if file exists
+            if [ -f "$LOG_FILE" ]; then
+              # Only print new lines (tail) to avoid spamming, 
+              # but for debugging we just print last 10 lines every second
+              clear > /dev/tty || true
+              echo "=== Logs (Second $i/30) ==="
+              tail -n 15 "$LOG_FILE"
+            fi
+            
+            sleep 1
+          done
+          
+          echo "---------------------------------------------------"
+          echo "=== Final Log Dump ==="
+          if [ -f "$LOG_FILE" ]; then
+            cat "$LOG_FILE"
+          else
+            echo "No log file created."
+          fi
+          
+          echo ""
+          echo "=== Checking Crash Reports ==="
+          ls -lt ~/Library/Logs/DiagnosticReports/ | grep -i rustdesk | head -5 || echo "No crash reports found."
+          
+          echo ""
+          echo "=== Checking Process Status ==="
+          ps aux | grep -i rustdesk | grep -v grep || echo "RustDesk process not running."
 
       - name: Install Tailscale
         env:
@@ -248,7 +271,7 @@ jobs:
           ┌──────────────────────────────────────────────────────────────┐
           │  OPTION 2: RUSTDESK (May show offline)                       │
           ├──────────────────────────────────────────────────────────────┤
-          │  ID: $RUSTDESK_ID
+          │  ID: $RUSTDESK_ID (Check logs above if blank)
           │  Password: kaiden123                                         │
           │                                                              │
           │  If offline, try direct IP connection:                       │
@@ -261,12 +284,6 @@ jobs:
           │  ssh kaiden@$TAILSCALE_IP
           │  Password: kaiden123                                         │
           └──────────────────────────────────────────────────────────────┘
-
-          ═══════════════════════════════════════════════════════════════
-            NOTE: ARD on port 3283 IS WORKING. Use Screens 5 or Jump
-            Desktop for best experience. VNC port 5900 is blocked on
-            macOS 15 but ARD port 3283 works!
-          ═══════════════════════════════════════════════════════════════
           
           EOF
 
@@ -311,7 +328,6 @@ jobs:
             fi
             
             echo "-----------------------------------------------------------"
-            # Prevent sleep and wait
             caffeinate -u -t 60 &
             sleep 300
           done
