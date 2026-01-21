@@ -95,7 +95,6 @@ jobs:
             -restart -agent -menu
           
           echo "Waiting for ARD to bind to port..."
-          # Retry loop to catch port binding
           for i in {1..10}; do
             if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
               echo "VNC_PORT=3283" >> $GITHUB_ENV
@@ -115,16 +114,15 @@ jobs:
         run: |
           echo "Installing latest RustDesk via Homebrew..."
           brew install --cask rustdesk
-          
-          # Remove quarantine to prevent Gatekeeper delays
           sudo xattr -cr /Applications/RustDesk.app
           echo "✅ RustDesk installed via Brew"
 
-      - name: Configure RustDesk (System Log Debug)
+      - name: Configure RustDesk (Fix Socket Wait)
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           CONFIG_DIR="$HOME/Library/Preferences/com.carriez.RustDesk"
           SYSLOG_FILE="/tmp/rustdesk_syslog.log"
+          SOCKET_PATH="/tmp/rustdesk/rustdesk.sock"
           
           mkdir -p "$CONFIG_DIR"
           
@@ -138,7 +136,6 @@ jobs:
           direct-access-port = '21118'
           EOF
           
-          # Copy to root config too
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           sudo cp "$CONFIG_DIR/RustDesk2.toml" /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
           
@@ -147,58 +144,66 @@ jobs:
           sleep 2
           
           echo "=== Starting System Log Monitor ==="
-          # We filter out "NSWindow" and "AppKit" logs to see actual errors
-          log stream --predicate 'process == "RustDesk" AND (messageType == error OR message CONTAINS "ERROR" OR message CONTAINS "fail" OR message CONTAINS "Permission")' --level debug > "$SYSLOG_FILE" 2>&1 &
+          # Filter out libMobileGestalt noise to see real errors
+          log stream --predicate 'process == "RustDesk" AND NOT (composedMessage CONTAINS "libMobileGestalt" OR composedMessage CONTAINS "Menu_Tracking" OR composedMessage CONTAINS "LaunchServices")' --level debug > "$SYSLOG_FILE" 2>&1 &
           LOG_PID=$!
-          
-          # Also capture standard logs in a separate file to see if it starts at all
-          log stream --predicate 'process == "RustDesk"' --level info > /tmp/rustdesk_all.log 2>&1 &
-          ALL_LOG_PID=$!
-          
-          echo "Log Monitor PIDs: $LOG_PID (Err), $ALL_LOG_PID (All)"
           
           echo "=== Starting RustDesk Service ==="
           sudo "$RUSTDESK_BIN" --service &
           SERVICE_PID=$!
           
           echo "RustDesk PID: $SERVICE_PID"
-          echo "Waiting for startup logs (20s)..."
+          echo ""
           echo "---------------------------------------------------"
+          echo "Waiting for IPC Socket (max 45s)..."
           
-          # Show logs periodically
-          for i in {1..20}; do
-            if [ -f "$SYSLOG_FILE" ]; then
-              # Show errors if any
-              ERR_CONTENT=$(cat "$SYSLOG_FILE" | tail -n 5)
-              if [ -n "$ERR_CONTENT" ]; then
-                echo "🔴 ERRORS FOUND (Second $i):"
-                echo "$ERR_CONTENT"
-              fi
+          # Wait for the specific socket file that the CLI needs to communicate
+          for i in {1..45}; do
+            if [ -S "$SOCKET_PATH" ]; then
+              echo "✅ Socket detected at $SOCKET_PATH"
+              break
             fi
-            
-            # Print a generic status if no errors
-            if [ $((i % 5)) -eq 0 ]; then
-              echo "[$i/20s] Waiting for RustDesk..."
+            if ! kill -0 $SERVICE_PID 2>/dev/null; then
+              echo "❌ RustDesk died while waiting for socket."
+              break
             fi
+            echo "Attempt $i..."
             sleep 1
           done
           
-          # Stop monitors
-          kill $LOG_PID $ALL_LOG_PID 2>/dev/null || true
+          kill $LOG_PID 2>/dev/null || true
           
           echo "---------------------------------------------------"
-          echo "=== FULL LOG DUMP (Last 50 lines) ==="
-          cat /tmp/rustdesk_all.log | tail -50 | grep -v "found no value for key" | grep -v "Menu_Tracking" | grep -v "LaunchServices"
+          echo "=== Last 20 lines of relevant logs ==="
+          cat "$SYSLOG_FILE" | tail -20
           
           echo ""
           echo "=== PROCESS STATUS ==="
           ps aux | grep -i rustdesk | grep -v grep
           
           echo ""
-          echo "=== TRYING TO GET ID AND SET PASSWORD ==="
-          sleep 3
-          "$RUSTDESK_BIN" --get-id || echo "Could not get ID"
-          sudo "$RUSTDESK_BIN" --password kaiden123 || echo "Could not set password"
+          echo "=== Getting ID ==="
+          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
+          echo "ID Output: $RUSTDESK_ID"
+          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=== Setting Password ==="
+          # Only try if socket exists
+          if [ -S "$SOCKET_PATH" ]; then
+            # Sometimes keychain needs a prod
+            sudo security unlock-keychain -p '' /var/root/Library/Keychains/login.keychain-db 2>/dev/null || true
+            
+            PASSWORD_RESULT=$(sudo "$RUSTDESK_BIN" --password kaiden123 2>&1)
+            echo "Result: $PASSWORD_RESULT"
+            if echo "$PASSWORD_RESULT" | grep -qi "done\|success\|password"; then
+              echo "✅ Password Set"
+            else
+              echo "⚠️ Password command failed (IPC issue). Connection might require manual approval."
+            fi
+          else
+            echo "⚠️ Socket not found. Cannot set password via CLI."
+          fi
 
       - name: Install Tailscale
         env:
@@ -237,7 +242,7 @@ jobs:
             Password:     kaiden123
 
           ┌──────────────────────────────────────────────────────────────┐
-          │  OPTION 1: APPLE REMOTE DESKTOP (RECOMMENDED)                 │
+          │  OPTION 1: APPLE REMOTE DESKTOP (RECOMMENDED - STABLE)       │
           ├──────────────────────────────────────────────────────────────┤
           EOF
           
@@ -256,19 +261,20 @@ jobs:
           └──────────────────────────────────────────────────────────────┘
 
           ┌──────────────────────────────────────────────────────────────┐
-          │  OPTION 2: RUSTDESK (Latest Version via Brew)                 │
+          │  OPTION 2: RUSTDESK (ID Available)                            │
           ├──────────────────────────────────────────────────────────────┤
-          │  ID: (See Logs)                                              │
-          │  Password: kaiden123                                         │
+          │  ID: $RUSTDESK_ID"
+          │  Password: kaiden123 (If CLI failed, try no password or set manually)│
           │                                                              │
-          │  Direct IP: $TAILSCALE_IP"
+          │  Direct IP (Works even if ID fails):                          │"
+          │  Enter this IP in RustDesk: $TAILSCALE_IP"
           └──────────────────────────────────────────────────────────────┘
 
           ┌──────────────────────────────────────────────────────────────┐
           │  OPTION 3: SSH                                               │
           ├──────────────────────────────────────────────────────────────┤
-          │  ssh kaiden@$TAILSCALE_IP
-          │  Password: kaiden123                                         │
+          │  ssh kaiden@$TAILSCALE_IP"
+          │  Password: kaiden123                                         │"
           └──────────────────────────────────────────────────────────────┘
           
           EOF
