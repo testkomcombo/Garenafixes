@@ -37,17 +37,97 @@ jobs:
           
           echo "✅ User 'kaiden' created"
 
-      - name: Configure TCC Permissions
+      - name: Configure TCC Permissions (Comprehensive)
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          BUNDLE_ID="com.carriez.RustDesk"
+          echo "=== Setting comprehensive TCC permissions ==="
           
-          for service in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServicePostEvent kTCCServiceListenEvent; do
-            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('$service', '$BUNDLE_ID', 0, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>/dev/null || true
+          # All clients that need screen access
+          CLIENTS=(
+            "com.apple.screensharing.agent"
+            "com.apple.RemoteDesktop.agent"
+            "com.apple.RemoteDesktop"
+            "com.carriez.RustDesk"
+            "/Applications/RustDesk.app"
+            "/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          )
+          
+          # All services needed
+          SERVICES=(
+            "kTCCServiceScreenCapture"
+            "kTCCServiceAccessibility"
+            "kTCCServicePostEvent"
+            "kTCCServiceListenEvent"
+          )
+          
+          # Grant all permissions
+          for client in "${CLIENTS[@]}"; do
+            for service in "${SERVICES[@]}"; do
+              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$service','$client',0,2,4,1);" 2>/dev/null || true
+            done
           done
           
+          # Additional format for some macOS versions
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,flags) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1,0,0);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,flags) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1,0,0);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,flags) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1,0,0);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,flags) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1,0,0);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,flags) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1,0,0);" 2>/dev/null || true
+          
+          echo ""
+          echo "=== Verifying TCC entries ==="
+          sudo sqlite3 "$TCC_DB" "SELECT service, client, auth_value FROM access WHERE client LIKE '%screensharing%' OR client LIKE '%RemoteDesktop%' OR client LIKE '%RustDesk%' OR client LIKE '%carriez%';" 2>/dev/null || echo "Could not query"
+          
           echo "✅ TCC permissions configured"
+
+      - name: Setup Apple Screen Sharing First
+        run: |
+          echo "=== Configuring Apple Screen Sharing ==="
+          
+          # Set VNC password
+          echo "kaiden123" | sudo perl -we '
+            $pw = <STDIN>; chomp $pw;
+            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
+            @p = unpack "C*", $pw;
+            foreach (0..length($pw)-1) { $p[$_] ^= $k[$_]; }
+            print pack "C*", @p;
+          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          
+          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
+          
+          # Configure Remote Management settings
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ScreenSharingReqPermEnabled -bool false
+          
+          # Enable Screen Sharing via launchctl
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          
+          # Start ARD with kickstart
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw kaiden123 \
+            -clientopts -setreqperm -reqperm no \
+            -allowAccessFor -allUsers \
+            -restart -agent -menu
+          
+          sleep 3
+          
+          echo ""
+          echo "=== Checking VNC status ==="
+          if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+            echo "VNC_AVAILABLE=true" >> $GITHUB_ENV
+            echo "✅ VNC running on port 5900"
+            lsof -iTCP:5900 -sTCP:LISTEN
+          else
+            echo "VNC_AVAILABLE=false" >> $GITHUB_ENV
+            echo "⚠️ VNC not listening on 5900"
+          fi
 
       - name: Install RustDesk
         run: |
@@ -69,16 +149,18 @@ jobs:
           
           echo "✅ RustDesk installed"
 
-      - name: Create RustDesk Config Directory
+      - name: Create RustDesk Config
         run: |
-          echo "=== Creating config directories ==="
+          echo "=== Creating RustDesk config directories ==="
           
-          sudo mkdir -p "/var/root/Library/Preferences/com.carriez.RustDesk"
-          sudo chmod 755 "/var/root/Library/Preferences/com.carriez.RustDesk"
+          # Create config directories for all users
+          for dir in "/var/root/Library/Preferences/com.carriez.RustDesk" \
+                     "$HOME/Library/Preferences/com.carriez.RustDesk" \
+                     "/Users/kaiden/Library/Preferences/com.carriez.RustDesk"; do
+            sudo mkdir -p "$dir"
+            sudo chmod 755 "$dir"
+          done
           
-          mkdir -p "$HOME/Library/Preferences/com.carriez.RustDesk"
-          
-          sudo mkdir -p "/Users/kaiden/Library/Preferences/com.carriez.RustDesk"
           sudo chown -R kaiden:staff "/Users/kaiden/Library/Preferences"
           
           echo "✅ Config directories created"
@@ -88,130 +170,104 @@ jobs:
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
           echo "=== Starting RustDesk service ==="
+          
+          # Start service with logging
           sudo nohup "$RUSTDESK_BIN" --service > /tmp/rustdesk_service.log 2>&1 &
-          SERVICE_PID=$!
-          echo "Service started with PID: $SERVICE_PID"
           
           echo "=== Waiting for service to initialize ==="
-          sleep 10
+          sleep 15
           
-          echo "=== Checking if service is running ==="
-          if pgrep -f "RustDesk.*service" > /dev/null; then
-            echo "✅ RustDesk service is running"
-            pgrep -f "RustDesk" 
-          else
-            echo "⚠️ Service may not be running, checking logs..."
-            cat /tmp/rustdesk_service.log 2>/dev/null | tail -20 || true
-          fi
+          echo "=== Service log ==="
+          cat /tmp/rustdesk_service.log 2>/dev/null | head -50 || echo "No log yet"
           
           echo ""
-          echo "=== Service log ==="
-          cat /tmp/rustdesk_service.log 2>/dev/null | head -30 || true
+          echo "=== Checking service process ==="
+          if pgrep -f "RustDesk.*service" > /dev/null; then
+            echo "✅ RustDesk service process running"
+            ps aux | grep -i rustdesk | grep -v grep
+          else
+            echo "❌ RustDesk service not running"
+            echo "Trying to start again..."
+            sudo "$RUSTDESK_BIN" --service &
+            sleep 10
+          fi
 
-      - name: Configure RustDesk Password
+      - name: Configure RustDesk
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
           echo "=== Setting RustDesk password ==="
           
-          for i in 1 2 3; do
-            echo "Attempt $i to set password..."
-            if sudo "$RUSTDESK_BIN" --password kaiden123 2>&1; then
-              echo "✅ Password set successfully"
+          # Try multiple times
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i..."
+            RESULT=$(sudo "$RUSTDESK_BIN" --password kaiden123 2>&1)
+            echo "Result: $RESULT"
+            
+            if echo "$RESULT" | grep -q "Done"; then
+              echo "✅ Password set"
               break
-            else
-              echo "Failed, waiting and retrying..."
-              sleep 5
             fi
+            sleep 3
           done
           
           echo ""
           echo "=== Getting RustDesk ID ==="
           RUSTDESK_ID=""
-          
-          for i in 1 2 3; do
-            RUSTDESK_ID=$(sudo "$RUSTDESK_BIN" --get-id 2>/dev/null || echo "")
+          for i in 1 2 3 4 5; do
+            RUSTDESK_ID=$(sudo "$RUSTDESK_BIN" --get-id 2>/dev/null)
             if [ -n "$RUSTDESK_ID" ] && [ "$RUSTDESK_ID" != "" ]; then
               echo "Got ID: $RUSTDESK_ID"
               break
             fi
-            echo "Waiting for ID... (attempt $i)"
+            echo "Waiting for ID (attempt $i)..."
             sleep 3
           done
-          
-          if [ -z "$RUSTDESK_ID" ]; then
-            RUSTDESK_ID="FAILED_TO_GET"
-          fi
           
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
           echo ""
-          echo "=== Checking config files ==="
-          
-          echo "Root config:"
-          ls -la /var/root/Library/Preferences/com.carriez.RustDesk/ 2>/dev/null || echo "  Not found"
-          cat /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml 2>/dev/null || true
-          
-          echo ""
-          echo "Runner config:"
-          ls -la "$HOME/Library/Preferences/com.carriez.RustDesk/" 2>/dev/null || echo "  Not found"
-          cat "$HOME/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml" 2>/dev/null || true
+          echo "=== Config files ==="
+          for dir in "/var/root/Library/Preferences/com.carriez.RustDesk" \
+                     "$HOME/Library/Preferences/com.carriez.RustDesk"; do
+            if [ -d "$dir" ]; then
+              echo "Directory: $dir"
+              ls -la "$dir/" 2>/dev/null
+              cat "$dir/RustDesk2.toml" 2>/dev/null || true
+              echo ""
+            fi
+          done
 
-      - name: Verify RustDesk Service Running
+      - name: Verify Services
         run: |
-          echo "=== Checking RustDesk processes ==="
-          ps aux | grep -i rustdesk | grep -v grep || echo "No RustDesk processes found"
+          echo "=== RustDesk Processes ==="
+          ps aux | grep -i rustdesk | grep -v grep || echo "No RustDesk processes"
           
           echo ""
-          echo "=== Checking listening ports ==="
-          lsof -i -P | grep -i rustdesk | head -10 || echo "No RustDesk ports found"
+          echo "=== RustDesk Service Log ==="
+          cat /tmp/rustdesk_service.log 2>/dev/null | tail -30 || echo "No log"
           
           echo ""
-          echo "=== RustDesk default ports ==="
-          echo "Port 21115 (NAT type test):"
-          lsof -iTCP:21115 -sTCP:LISTEN 2>/dev/null || echo "  Not listening"
-          echo "Port 21116 (TCP hole punching):"
-          lsof -iTCP:21116 -sTCP:LISTEN 2>/dev/null || echo "  Not listening"
-          echo "Port 21117 (Relay):"
-          lsof -iTCP:21117 -sTCP:LISTEN 2>/dev/null || echo "  Not listening"
+          echo "=== Network Ports ==="
+          echo "All listening ports:"
+          lsof -i -P | grep LISTEN | head -20
           
           echo ""
-          echo "=== Service log tail ==="
-          tail -30 /tmp/rustdesk_service.log 2>/dev/null || true
+          echo "=== VNC Port 5900 ==="
+          lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null || echo "Not listening"
           
+          echo ""
+          echo "=== Restart RustDesk service to ensure it's running ==="
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
-          if ! pgrep -f "RustDesk.*service" > /dev/null; then
-            echo ""
-            echo "=== Service not running, restarting ==="
-            sudo nohup "$RUSTDESK_BIN" --service >> /tmp/rustdesk_service.log 2>&1 &
-            sleep 5
-          fi
-
-      - name: Setup Apple VNC (Backup)
-        run: |
-          echo "kaiden123" | sudo perl -we '
-            $pw = <STDIN>; chomp $pw;
-            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
-            @p = unpack "C*", $pw;
-            foreach (0..length($pw)-1) { $p[$_] ^= $k[$_]; }
-            print pack "C*", @p;
-          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          sudo pkill -f "RustDesk.*service" 2>/dev/null || true
+          sleep 2
+          sudo nohup "$RUSTDESK_BIN" --service >> /tmp/rustdesk_service.log 2>&1 &
+          sleep 5
           
-          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
-          
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw kaiden123 \
-            -allowAccessFor -allUsers \
-            -restart -agent -menu 2>/dev/null || true
-          
-          if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-            echo "VNC_AVAILABLE=true" >> $GITHUB_ENV
-            echo "✅ VNC on port 5900"
+          if pgrep -f "RustDesk.*service" > /dev/null; then
+            echo "✅ RustDesk service restarted"
           else
-            echo "VNC_AVAILABLE=false" >> $GITHUB_ENV
-            echo "⚠️ VNC not available"
+            echo "❌ RustDesk service failed to start"
           fi
 
       - name: Install Tailscale
@@ -253,17 +309,20 @@ jobs:
           echo "│  Password: kaiden123                                         │"
           echo "└──────────────────────────────────────────────────────────────┘"
           echo ""
+          if [ "$VNC_AVAILABLE" = "true" ]; then
           echo "┌──────────────────────────────────────────────────────────────┐"
-          echo "│  VNC (Backup - Works but slower)                             │"
+          echo "│  VNC (Backup - Slower but works)                             │"
           echo "├──────────────────────────────────────────────────────────────┤"
-          echo "│  vnc://$TAILSCALE_IP                                         │"
+          echo "│  vnc://$TAILSCALE_IP:5900                                    │"
           echo "│  Password: kaiden123                                         │"
           echo "└──────────────────────────────────────────────────────────────┘"
           echo ""
+          fi
           echo "┌──────────────────────────────────────────────────────────────┐"
           echo "│  SSH                                                         │"
           echo "├──────────────────────────────────────────────────────────────┤"
           echo "│  ssh kaiden@$TAILSCALE_IP                                    │"
+          echo "│  Password: kaiden123                                         │"
           echo "└──────────────────────────────────────────────────────────────┘"
           echo ""
 
@@ -279,17 +338,26 @@ jobs:
           while true; do
             echo "[$(date '+%H:%M:%S')] Health Check:"
             
+            # Check RustDesk
             if pgrep -f "RustDesk.*service" > /dev/null; then
-              echo "  ✅ RustDesk service running"
+              echo "  ✅ RustDesk service"
             else
-              echo "  ⚠️ RustDesk service not running - restarting..."
+              echo "  ⚠️ RustDesk restarting..."
               sudo nohup "$RUSTDESK_BIN" --service >> /tmp/rustdesk_service.log 2>&1 &
               sleep 3
               sudo "$RUSTDESK_BIN" --password kaiden123 2>/dev/null || true
             fi
             
+            # Check VNC
+            if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              echo "  ✅ VNC on 5900"
+            else
+              echo "  ⚠️ VNC not available"
+            fi
+            
+            # Check Tailscale
             if pgrep -f tailscaled > /dev/null; then
-              echo "  ✅ Tailscale connected ($TAILSCALE_IP)"
+              echo "  ✅ Tailscale ($TAILSCALE_IP)"
             else
               echo "  ❌ Tailscale down"
             fi
