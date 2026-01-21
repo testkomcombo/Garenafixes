@@ -13,7 +13,6 @@ jobs:
         run: |
           echo "=== macOS Version ==="
           sw_vers
-          echo ""
           echo "=== Hardware ==="
           sysctl -n machdep.cpu.brand_string
 
@@ -42,11 +41,28 @@ jobs:
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          for service in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServicePostEvent; do
-            for client in com.apple.screensharing.agent com.carriez.RustDesk; do
+          CLIENTS=(
+            "com.apple.screensharing.agent"
+            "com.apple.RemoteDesktop.agent"
+            "com.carriez.RustDesk"
+            "/Applications/RustDesk.app"
+            "/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          )
+          
+          SERVICES=(
+            "kTCCServiceScreenCapture"
+            "kTCCServiceAccessibility"
+            "kTCCServicePostEvent"
+            "kTCCServiceListenEvent"
+          )
+          
+          for client in "${CLIENTS[@]}"; do
+            for service in "${SERVICES[@]}"; do
               sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$service','$client',0,2,4,1);" 2>/dev/null || true
             done
           done
+          
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,flags) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1,0,0);" 2>/dev/null || true
           
           echo "✅ TCC permissions configured"
 
@@ -55,74 +71,111 @@ jobs:
           echo "=== Downloading RustDesk ==="
           ARCH=$(uname -m)
           if [ "$ARCH" = "arm64" ]; then
-            RUSTDESK_URL="https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-aarch64.dmg"
+            curl -L -o /tmp/rustdesk.dmg "https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-aarch64.dmg"
           else
-            RUSTDESK_URL="https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-x86_64.dmg"
+            curl -L -o /tmp/rustdesk.dmg "https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-x86_64.dmg"
           fi
           
-          curl -L -o /tmp/rustdesk.dmg "$RUSTDESK_URL"
-          
-          echo "=== Installing ==="
           hdiutil attach /tmp/rustdesk.dmg -nobrowse -quiet
-          MOUNT_POINT=$(find /Volumes -maxdepth 1 -name "*rustdesk*" -o -name "*RustDesk*" 2>/dev/null | head -1)
-          sudo cp -R "$MOUNT_POINT/RustDesk.app" /Applications/
-          hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-          
+          MOUNT=$(find /Volumes -maxdepth 1 -iname "*rustdesk*" | head -1)
+          sudo cp -R "$MOUNT/RustDesk.app" /Applications/
+          hdiutil detach "$MOUNT" -quiet 2>/dev/null || true
           sudo xattr -cr /Applications/RustDesk.app
           
           echo "✅ RustDesk installed"
 
-      - name: Configure and Start RustDesk
+      - name: Configure RustDesk Password
         run: |
-          echo "=== Starting RustDesk ==="
-          open /Applications/RustDesk.app
-          sleep 10
-          
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          CONFIG_DIR="/Users/runner/Library/Preferences/com.carriez.RustDesk"
           
-          echo "=== Setting RustDesk Password ==="
-          "$RUSTDESK_BIN" --password kaiden123 2>/dev/null &
+          echo "=== Starting RustDesk first time to generate config ==="
+          open /Applications/RustDesk.app
+          sleep 8
+          
+          echo "=== Setting password with sudo ==="
+          sudo "$RUSTDESK_BIN" --password kaiden123 || true
+          sleep 2
+          
+          echo "=== Trying alternative password method ==="
+          if [ -d "$CONFIG_DIR" ]; then
+            echo "Config directory exists: $CONFIG_DIR"
+            ls -la "$CONFIG_DIR/"
+            
+            if [ -f "$CONFIG_DIR/RustDesk2.toml" ]; then
+              echo ""
+              echo "=== Current RustDesk2.toml ==="
+              cat "$CONFIG_DIR/RustDesk2.toml"
+            fi
+          fi
+          
+          echo ""
+          echo "=== Setting password via service command ==="
+          sudo "$RUSTDESK_BIN" --service &
           sleep 3
+          sudo "$RUSTDESK_BIN" --password kaiden123
+          sleep 2
+          
+          pkill -f "RustDesk.*service" 2>/dev/null || true
+          
+          echo ""
+          echo "=== Restarting RustDesk ==="
+          pkill -f RustDesk 2>/dev/null || true
+          sleep 2
+          open /Applications/RustDesk.app
+          sleep 5
+
+      - name: Get RustDesk ID and Verify
+        run: |
+          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
           echo "=== Getting RustDesk ID ==="
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>/dev/null || echo "")
           
           if [ -z "$RUSTDESK_ID" ]; then
-            sleep 5
+            sleep 3
             RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>/dev/null || echo "")
           fi
           
           if [ -z "$RUSTDESK_ID" ]; then
             CONFIG_DIR="/Users/runner/Library/Preferences/com.carriez.RustDesk"
             if [ -f "$CONFIG_DIR/RustDesk2.toml" ]; then
-              RUSTDESK_ID=$(grep -E "^id\s*=" "$CONFIG_DIR/RustDesk2.toml" 2>/dev/null | sed "s/id *= *//" | tr -d "'" | tr -d '"')
+              RUSTDESK_ID=$(grep -E "^id\s*=" "$CONFIG_DIR/RustDesk2.toml" | sed "s/id *= *//" | tr -d "'" | tr -d '"')
             fi
-          fi
-          
-          if [ -z "$RUSTDESK_ID" ]; then
-            RUSTDESK_ID="FAILED_TO_GET_ID"
           fi
           
           echo "RustDesk ID: $RUSTDESK_ID"
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
+          echo ""
+          echo "=== Checking if password is set ==="
+          CONFIG_DIR="/Users/runner/Library/Preferences/com.carriez.RustDesk"
+          if [ -f "$CONFIG_DIR/RustDesk2.toml" ]; then
+            if grep -q "password" "$CONFIG_DIR/RustDesk2.toml"; then
+              echo "✅ Password appears to be configured"
+            else
+              echo "⚠️ Password may not be set in config"
+            fi
+            echo ""
+            echo "=== Config contents ==="
+            cat "$CONFIG_DIR/RustDesk2.toml" 2>/dev/null || true
+          fi
+          
+          echo ""
           if pgrep -f "RustDesk" > /dev/null; then
             echo "✅ RustDesk is running"
           else
-            echo "⚠️ RustDesk not running, starting again..."
+            echo "⚠️ RustDesk not running, starting..."
             open /Applications/RustDesk.app
           fi
 
       - name: Setup Apple VNC (Backup)
         run: |
           echo "kaiden123" | sudo perl -we '
-            $pw = <STDIN>;
-            chomp $pw;
+            $pw = <STDIN>; chomp $pw;
             @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
             @p = unpack "C*", $pw;
-            foreach (0..length($pw)-1) {
-              $p[$_] ^= $k[$_];
-            }
+            foreach (0..length($pw)-1) { $p[$_] ^= $k[$_]; }
             print pack "C*", @p;
           ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
           
@@ -136,11 +189,11 @@ jobs:
             -restart -agent -menu 2>/dev/null || true
           
           if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-            echo "✅ VNC available on port 5900"
             echo "VNC_AVAILABLE=true" >> $GITHUB_ENV
+            echo "✅ VNC on port 5900"
           else
-            echo "⚠️ VNC not available (macOS 15 restriction)"
             echo "VNC_AVAILABLE=false" >> $GITHUB_ENV
+            echo "⚠️ VNC not available (macOS 15)"
           fi
 
       - name: Install Tailscale
@@ -160,8 +213,6 @@ jobs:
             up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=macos-rdp-${{ github.run_id }}
           
-          sleep 3
-          
           TS_IP=$(sudo /opt/homebrew/opt/tailscale/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
           echo "✅ Tailscale: $TS_IP"
@@ -178,18 +229,18 @@ jobs:
           echo "  Password:     kaiden123"
           echo ""
           echo "┌──────────────────────────────────────────────────────────────┐"
-          echo "│  RUSTDESK (Fast - Recommended)                               │"
+          echo "│  RUSTDESK (Fast)                                             │"
           echo "├──────────────────────────────────────────────────────────────┤"
-          echo "│  1. Download: https://rustdesk.com                           │"
-          echo "│  2. ID: $RUSTDESK_ID"
-          echo "│  3. Password: kaiden123                                      │"
+          echo "│  Download: https://rustdesk.com                              │"
+          echo "│  ID: $RUSTDESK_ID"
+          echo "│  Password: kaiden123                                         │"
           echo "│                                                              │"
-          echo "│  Or connect via IP: $TAILSCALE_IP"
+          echo "│  Or connect via Tailscale IP: $TAILSCALE_IP"
           echo "└──────────────────────────────────────────────────────────────┘"
           echo ""
           if [ "$VNC_AVAILABLE" = "true" ]; then
           echo "┌──────────────────────────────────────────────────────────────┐"
-          echo "│  VNC (Backup)                                                │"
+          echo "│  VNC (Backup - Slower)                                       │"
           echo "├──────────────────────────────────────────────────────────────┤"
           echo "│  vnc://$TAILSCALE_IP:5900"
           echo "│  Password: kaiden123                                         │"
@@ -200,6 +251,7 @@ jobs:
           echo "│  SSH                                                         │"
           echo "├──────────────────────────────────────────────────────────────┤"
           echo "│  ssh kaiden@$TAILSCALE_IP"
+          echo "│  Password: kaiden123                                         │"
           echo "└──────────────────────────────────────────────────────────────┘"
           echo ""
 
@@ -208,12 +260,10 @@ jobs:
           echo "Session started: $(date)"
           
           while true; do
-            echo ""
             echo "[$(date '+%H:%M:%S')] Status:"
-            
-            pgrep -f "RustDesk" > /dev/null && echo "  ✅ RustDesk" || { echo "  ⚠️ RustDesk restarting..."; open /Applications/RustDesk.app; }
-            pgrep -f tailscaled > /dev/null && echo "  ✅ Tailscale ($TAILSCALE_IP)" || echo "  ❌ Tailscale down"
-            
+            pgrep -f "RustDesk" > /dev/null && echo "  ✅ RustDesk" || { open /Applications/RustDesk.app 2>/dev/null; echo "  ⚠️ RustDesk restarted"; }
+            pgrep -f tailscaled > /dev/null && echo "  ✅ Tailscale ($TAILSCALE_IP)" || echo "  ❌ Tailscale"
+            echo ""
             caffeinate -u -t 60 &
             sleep 300
           done
