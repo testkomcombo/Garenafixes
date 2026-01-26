@@ -206,11 +206,11 @@ jobs:
           chmod 644 ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist
           
           echo ""
-          echo "=== SETTING UP CONFIG WITH PASSWORD ==="
+          echo "=== SETTING UP INITIAL CONFIG (NO PASSWORD YET) ==="
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           
-          # Create config with password
+          # Create config WITHOUT password first
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << 'EOFCFG'
           rendezvous_server = 'rs-ny.rustdesk.com'
           nat_type = 1
@@ -219,7 +219,6 @@ jobs:
           [options]
           direct-server = 'Y'
           direct-access-port = '21118'
-          password = 'kaiden123'
           allow-lan-discovery = 'Y'
           EOFCFG
           
@@ -246,6 +245,22 @@ jobs:
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
           echo "RustDesk ID: $RUSTDESK_ID"
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=== SETTING PASSWORD (CRITICAL: Must be done while service is running) ==="
+          # This MUST happen after --server is running
+          sudo "$RUSTDESK_BIN" --password kaiden123 2>&1 || echo "CLI password method failed, trying config..."
+          
+          # Fallback: Add to config and let RustDesk encrypt it
+          if ! sudo grep -q "password" /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml; then
+            echo "password = 'kaiden123'" | sudo tee -a /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml > /dev/null
+            # Signal processes to reload config
+            sudo launchctl kickstart -k system/com.carriez.RustDesk_service
+            launchctl kickstart -k gui/$(id -u)/com.carriez.RustDesk_server
+            sleep 3
+          fi
+          
+          echo "✅ Password set"
           
           echo ""
           echo "✅ RustDesk configured with service and server"
