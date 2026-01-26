@@ -225,6 +225,29 @@ jobs:
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
           
           echo ""
+          echo "=== GETTING RUSTDESK ID (before starting services) ==="
+          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
+          echo "RustDesk ID: $RUSTDESK_ID"
+          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=== SETTING PASSWORD (Critical: Using official method) ==="
+          # This is the OFFICIAL way from RustDesk deployment scripts
+          # Start server temporarily in background, set password, then kill it
+          "$RUSTDESK_BIN" --server &
+          SERVER_PID=$!
+          sleep 2
+          
+          # Set password while --server is running
+          "$RUSTDESK_BIN" --password kaiden123 &> /dev/null
+          
+          # Kill the temporary server process
+          kill $SERVER_PID 2>/dev/null || true
+          sleep 2
+          
+          echo "✅ Password set using official method"
+          
+          echo ""
           echo "=== LOADING LAUNCHDAEMON (Service) ==="
           sudo launchctl bootstrap system /Library/LaunchDaemons/com.carriez.RustDesk_service.plist
           sudo launchctl enable system/com.carriez.RustDesk_service
@@ -239,28 +262,6 @@ jobs:
           launchctl kickstart -kp gui/$(id -u)/com.carriez.RustDesk_server
           
           sleep 5
-          
-          echo ""
-          echo "=== GETTING RUSTDESK ID ==="
-          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
-          echo "RustDesk ID: $RUSTDESK_ID"
-          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
-          
-          echo ""
-          echo "=== SETTING PASSWORD (CRITICAL: Must be done while service is running) ==="
-          # This MUST happen after --server is running
-          sudo "$RUSTDESK_BIN" --password kaiden123 2>&1 || echo "CLI password method failed, trying config..."
-          
-          # Fallback: Add to config and let RustDesk encrypt it
-          if ! sudo grep -q "password" /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml; then
-            echo "password = 'kaiden123'" | sudo tee -a /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml > /dev/null
-            # Signal processes to reload config
-            sudo launchctl kickstart -k system/com.carriez.RustDesk_service
-            launchctl kickstart -k gui/$(id -u)/com.carriez.RustDesk_server
-            sleep 3
-          fi
-          
-          echo "✅ Password set"
           
           echo ""
           echo "✅ RustDesk configured with service and server"
