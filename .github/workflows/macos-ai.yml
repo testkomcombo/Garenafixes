@@ -231,21 +231,32 @@ jobs:
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
           echo ""
-          echo "=== SETTING PASSWORD (Critical: Using official method) ==="
-          # This is the OFFICIAL way from RustDesk deployment scripts
+          echo "=== SETTING PASSWORD (Critical: Using OFFICIAL deployment method) ==="
+          # This is the EXACT official method from RustDesk macOS deployment docs
           # Start server temporarily in background, set password, then kill it
           "$RUSTDESK_BIN" --server &
           SERVER_PID=$!
-          sleep 2
+          sleep 3
           
           # Set password while --server is running
           "$RUSTDESK_BIN" --password kaiden123 &> /dev/null
           
           # Kill the temporary server process
           kill $SERVER_PID 2>/dev/null || true
+          pkill -9 RustDesk 2>/dev/null || true
           sleep 2
           
-          echo "✅ Password set using official method"
+          echo ""
+          echo "=== FINALIZING PASSWORD (Launch GUI to register password) ==="
+          # CRITICAL: Launch GUI app to finalize password - from official docs
+          open -n /Applications/RustDesk.app
+          sleep 5
+          
+          # Kill GUI process
+          pkill -9 RustDesk 2>/dev/null || true
+          sleep 2
+          
+          echo "✅ Password set and finalized using official method"
           
           echo ""
           echo "=== LOADING LAUNCHDAEMON (Service) ==="
