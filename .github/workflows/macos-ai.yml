@@ -143,12 +143,8 @@ jobs:
 
           mkdir -p "$CONFIG_DIR"
           
-          # Generate a random ID manually (9 digits)
-          RANDOM_ID=$(( 100000000 + RANDOM * RANDOM % 900000000 ))
-          echo "Generated Random ID: $RANDOM_ID"
-          
-          # Setup initial config WITH custom ID and WITHOUT password
-          cat > "$CONFIG_DIR/RustDesk2.toml" << EOF
+          # Setup initial config WITHOUT password but with network settings
+          cat > "$CONFIG_DIR/RustDesk2.toml" << 'EOF'
           rendezvous_server = 'rs-ny.rustdesk.com'
           nat_type = 1
           serial = 0
@@ -156,11 +152,7 @@ jobs:
           [options]
           direct-server = 'Y'
           direct-access-port = '21118'
-          custom-rendezvous-server = ''
-          key = ''
-          
-          [info]
-          id = '$RANDOM_ID'
+          allow-lan-discovery = 'Y'
           EOF
           
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
@@ -209,17 +201,9 @@ jobs:
           
           echo ""
           echo "=== Getting ID ==="
-          # Get ID (should match our custom ID)
+          # Get ID
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
-          
-          # If the binary returns a different ID, use our custom one
-          if [ -z "$RUSTDESK_ID" ] || [ "$RUSTDESK_ID" = "524646350" ]; then
-            RUSTDESK_ID=$RANDOM_ID
-            echo "Using custom ID: $RUSTDESK_ID"
-          else
-            echo "ID Output: $RUSTDESK_ID"
-          fi
-          
+          echo "RustDesk ID: $RUSTDESK_ID"
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
           echo ""
@@ -228,7 +212,7 @@ jobs:
           if [ "$SOCKET_FOUND" = true ]; then
             echo "Attempting to set password via config file method..."
             
-            # Write password directly to config file
+            # Write password directly to config file with network settings
             sudo tee /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml > /dev/null << 'EOFPW'
           rendezvous_server = 'rs-ny.rustdesk.com'
           nat_type = 1
@@ -238,6 +222,7 @@ jobs:
           direct-server = 'Y'
           direct-access-port = '21118'
           password = 'kaiden123'
+          allow-lan-discovery = 'Y'
           EOFPW
             
             # Give service time to detect config change
@@ -305,12 +290,31 @@ jobs:
           ls -l /tmp/rustdesk/ 2>/dev/null || echo "Socket dir not found"
           
           echo ""
+          echo "--- Network Ports ---"
+          echo "Checking RustDesk network listeners:"
+          lsof -iTCP -sTCP:LISTEN | grep -i rustdesk || echo "No TCP listeners found"
+          netstat -an | grep "21118\|21119" || echo "Ports 21118/21119 not listening"
+          
+          echo ""
           echo "--- Log Excerpt ---"
           tail -30 /tmp/rustdesk_syslog.log 2>/dev/null || echo "Log file not found"
           
           echo ""
           echo "--- RustDesk Process Check ---"
           ps aux | grep -i rustdesk | grep -v grep || echo "No RustDesk process found"
+
+      - name: Configure Firewall for RustDesk
+        run: |
+          echo "=== Configuring macOS Firewall ==="
+          
+          # Disable firewall temporarily (GitHub runners usually have it off anyway)
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off 2>/dev/null || true
+          
+          # Add RustDesk to firewall exceptions
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /Applications/RustDesk.app 2>/dev/null || true
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /Applications/RustDesk.app 2>/dev/null || true
+          
+          echo "✅ Firewall configured"
 
       - name: Install Tailscale
         env:
