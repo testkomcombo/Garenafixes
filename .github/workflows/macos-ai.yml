@@ -126,7 +126,7 @@ jobs:
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           CONFIG_DIR="$HOME/Library/Preferences/com.carriez.RustDesk"
-          SOCKET_PATH="/tmp/rustdesk/rustdesk.sock"
+          SOCKET_PATH="/tmp/rustdesk/ipc_service"
           SYSLOG_FILE="/tmp/rustdesk_syslog.log"
 
           echo "=== CLEANUP CONFIGS (Fix Static ID) ==="
@@ -143,7 +143,7 @@ jobs:
 
           mkdir -p "$CONFIG_DIR"
           
-          # Setup config
+          # Setup initial config WITHOUT password
           cat > "$CONFIG_DIR/RustDesk2.toml" << 'EOF'
           rendezvous_server = 'rs-ny.rustdesk.com'
           nat_type = 1
@@ -162,7 +162,7 @@ jobs:
           sudo chmod 777 /tmp/rustdesk
           
           echo "=== Starting System Log Monitor ==="
-          log stream --predicate 'process == "RustDesk" AND NOT (composedMessage CONTAINS "libMobileGestalt" OR composedMessage CONTAINS "Menu_Tracking" OR composedMessage CONTAINS "LaunchServices")' --level debug > "$SYSLOG_FILE" 2>&1 &
+          log stream --predicate 'process == "RustDesk"' --level debug > "$SYSLOG_FILE" 2>&1 &
           LOG_PID=$!
           
           echo "=== Starting RustDesk Service ==="
@@ -174,10 +174,13 @@ jobs:
           echo "Waiting for IPC Socket (max 60s)..."
           
           # Wait for the specific socket file
+          SOCKET_FOUND=false
           for i in {1..60}; do
             # Check using sudo because the service is root, but verify permissions allow us to see it
             if [ -S "$SOCKET_PATH" ]; then
               echo "✅ Socket detected at $SOCKET_PATH"
+              SOCKET_FOUND=true
+              sleep 3  # Extra wait for service to fully initialize
               break
             fi
             if ! kill -0 $SERVICE_PID 2>/dev/null; then
@@ -203,27 +206,68 @@ jobs:
           
           echo ""
           echo "=== Setting Password ==="
-          # Unlock keychain just in case
-          sudo security unlock-keychain -p '' /var/root/Library/Keychains/login.keychain-db 2>/dev/null || true
           
-          PASSWORD_SET=false
-          for i in {1..5}; do
-            PASSWORD_RESULT=$(sudo "$RUSTDESK_BIN" --password kaiden123 2>&1)
-            echo "Attempt $i Result: $PASSWORD_RESULT"
-            if echo "$PASSWORD_RESULT" | grep -qi "done\|success\|password"; then
-              echo "✅ Password Set"
-              PASSWORD_SET=true
-              break
-            fi
+          if [ "$SOCKET_FOUND" = true ]; then
+            echo "Attempting to set password via config file method..."
+            
+            # Write password directly to config file
+            sudo tee /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml > /dev/null << 'EOFPW'
+          rendezvous_server = 'rs-ny.rustdesk.com'
+          nat_type = 1
+          serial = 0
+          
+          [options]
+          direct-server = 'Y'
+          direct-access-port = '21118'
+          password = 'kaiden123'
+          EOFPW
+            
+            # Give service time to detect config change
             sleep 2
-          done
-          
-          if [ "$PASSWORD_SET" = false ]; then
-            echo "⚠️ Password command failed via CLI. Trying alternative config method..."
-            # Sometimes password writing to file works if CLI fails
-            # Note: Newer RustDesk versions encrypt this, so this is a best-effort fallback
+            
+            # Verify password was written
+            if sudo grep -q "password = 'kaiden123'" /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml; then
+              echo "✅ Password written to config file"
+              
+              # Restart service to ensure password is loaded
+              echo "Restarting RustDesk to load password..."
+              sudo pkill -9 -f "RustDesk --service" || true
+              sleep 2
+              sudo "$RUSTDESK_BIN" --service &
+              sleep 5
+              
+              # Wait for socket again after restart
+              for i in {1..30}; do
+                if [ -S "$SOCKET_PATH" ]; then
+                  echo "✅ Service restarted with password"
+                  break
+                fi
+                sleep 1
+              done
+            else
+              echo "⚠️ Failed to write password to config"
+            fi
+            
+            # Also try CLI method as backup
+            echo ""
+            echo "Attempting CLI password method as backup..."
+            for i in {1..3}; do
+              PASSWORD_RESULT=$(sudo "$RUSTDESK_BIN" --password kaiden123 2>&1)
+              echo "CLI Attempt $i: $PASSWORD_RESULT"
+              if echo "$PASSWORD_RESULT" | grep -qi "done\|success"; then
+                echo "✅ Password also set via CLI"
+                break
+              fi
+              sleep 2
+            done
+          else
+            echo "❌ Socket not found, cannot set password reliably"
+            echo "Attempting config file method anyway..."
             echo "password = 'kaiden123'" | sudo tee -a /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml > /dev/null || true
           fi
+          
+          echo ""
+          echo "✅ RustDesk configuration complete"
 
       - name: RustDesk Debug Dump (Diag Info)
         if: always()
@@ -245,6 +289,10 @@ jobs:
           echo ""
           echo "--- Log Excerpt ---"
           tail -30 /tmp/rustdesk_syslog.log 2>/dev/null || echo "Log file not found"
+          
+          echo ""
+          echo "--- RustDesk Process Check ---"
+          ps aux | grep -i rustdesk | grep -v grep || echo "No RustDesk process found"
 
       - name: Install Tailscale
         env:
@@ -350,6 +398,7 @@ jobs:
             else
               echo "  ⚠️ RustDesk not running, restarting..."
               sudo "$RUSTDESK_BIN" --service &
+              sleep 5
             fi
             
             if pgrep -f tailscaled > /dev/null; then
