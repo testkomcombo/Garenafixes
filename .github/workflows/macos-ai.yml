@@ -41,8 +41,13 @@ jobs:
           
           echo "✅ User '$USERNAME' created"
 
-      - name: Configure TCC Permissions
+      - name: Configure TCC Permissions (Enhanced)
         run: |
+          # Reset permissions to ensure a clean state
+          sudo tccutil reset ScreenCapture com.carriez.RustDesk 2>/dev/null || true
+          sudo tccutil reset Accessibility com.carriez.RustDesk 2>/dev/null || true
+          sudo tccutil reset All com.carriez.RustDesk 2>/dev/null || true
+
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
           CLIENTS=(
@@ -117,13 +122,25 @@ jobs:
           sudo xattr -cr /Applications/RustDesk.app
           echo "✅ RustDesk installed via Brew"
 
-      - name: Configure RustDesk (Fix Socket Wait)
+      - name: Configure RustDesk (Fix ID & Password)
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           CONFIG_DIR="$HOME/Library/Preferences/com.carriez.RustDesk"
-          SYSLOG_FILE="/tmp/rustdesk_syslog.log"
           SOCKET_PATH="/tmp/rustdesk/rustdesk.sock"
+          SYSLOG_FILE="/tmp/rustdesk_syslog.log"
+
+          echo "=== CLEANUP CONFIGS (Fix Static ID) ==="
+          # Stop any existing instances
+          sudo pkill -9 -f RustDesk || true
+          sleep 2
           
+          # Remove old config files to force a new ID
+          sudo rm -rf /var/root/Library/Preferences/com.carriez.RustDesk
+          sudo rm -rf /var/root/Library/Application\ Support/com.carriez.RustDesk
+          rm -rf "$HOME/Library/Preferences/com.carriez.RustDesk"
+          rm -rf "$HOME/Library/Application Support/com.carriez.RustDesk"
+          echo "✅ Old configs purged"
+
           mkdir -p "$CONFIG_DIR"
           
           # Setup config
@@ -139,12 +156,12 @@ jobs:
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           sudo cp "$CONFIG_DIR/RustDesk2.toml" /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
           
-          echo "=== Cleaning previous RustDesk processes ==="
-          pkill -9 -f RustDesk || true
-          sleep 2
+          echo "=== FIXING SOCKET PERMISSIONS ==="
+          # Create the socket directory with loose permissions so the runner can see it
+          sudo mkdir -p /tmp/rustdesk
+          sudo chmod 777 /tmp/rustdesk
           
           echo "=== Starting System Log Monitor ==="
-          # Filter out libMobileGestalt noise to see real errors
           log stream --predicate 'process == "RustDesk" AND NOT (composedMessage CONTAINS "libMobileGestalt" OR composedMessage CONTAINS "Menu_Tracking" OR composedMessage CONTAINS "LaunchServices")' --level debug > "$SYSLOG_FILE" 2>&1 &
           LOG_PID=$!
           
@@ -153,18 +170,13 @@ jobs:
           SERVICE_PID=$!
           
           echo "RustDesk PID: $SERVICE_PID"
-          echo ""
           echo "---------------------------------------------------"
-          echo "Waiting for IPC Socket (max 45s)..."
+          echo "Waiting for IPC Socket (max 60s)..."
           
-          # Ensure the socket directory has correct permissions so we can check for the file
-          sudo mkdir -p /tmp/rustdesk
-          sudo chmod 777 /tmp/rustdesk
-          
-          # Wait for the specific socket file that the CLI needs to communicate
-          for i in {1..45}; do
-            # Use sudo to check for the socket because the service runs as root
-            if sudo test -S "$SOCKET_PATH"; then
+          # Wait for the specific socket file
+          for i in {1..60}; do
+            # Check using sudo because the service is root, but verify permissions allow us to see it
+            if [ -S "$SOCKET_PATH" ]; then
               echo "✅ Socket detected at $SOCKET_PATH"
               break
             fi
@@ -179,36 +191,60 @@ jobs:
           kill $LOG_PID 2>/dev/null || true
           
           echo "---------------------------------------------------"
-          echo "=== Last 20 lines of relevant logs ==="
-          cat "$SYSLOG_FILE" | tail -20
-          
-          echo ""
           echo "=== PROCESS STATUS ==="
           ps aux | grep -i rustdesk | grep -v grep
           
           echo ""
           echo "=== Getting ID ==="
+          # Get ID
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
           echo "ID Output: $RUSTDESK_ID"
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
           echo ""
           echo "=== Setting Password ==="
-          # Only try if socket exists (checking with sudo as per previous loop)
-          if sudo test -S "$SOCKET_PATH"; then
-            # Sometimes keychain needs a prod
-            sudo security unlock-keychain -p '' /var/root/Library/Keychains/login.keychain-db 2>/dev/null || true
-            
+          # Unlock keychain just in case
+          sudo security unlock-keychain -p '' /var/root/Library/Keychains/login.keychain-db 2>/dev/null || true
+          
+          PASSWORD_SET=false
+          for i in {1..5}; do
             PASSWORD_RESULT=$(sudo "$RUSTDESK_BIN" --password kaiden123 2>&1)
-            echo "Result: $PASSWORD_RESULT"
+            echo "Attempt $i Result: $PASSWORD_RESULT"
             if echo "$PASSWORD_RESULT" | grep -qi "done\|success\|password"; then
               echo "✅ Password Set"
-            else
-              echo "⚠️ Password command failed (IPC issue). Connection might require manual approval."
+              PASSWORD_SET=true
+              break
             fi
-          else
-            echo "⚠️ Socket not found. Cannot set password via CLI."
+            sleep 2
+          done
+          
+          if [ "$PASSWORD_SET" = false ]; then
+            echo "⚠️ Password command failed via CLI. Trying alternative config method..."
+            # Sometimes password writing to file works if CLI fails
+            # Note: Newer RustDesk versions encrypt this, so this is a best-effort fallback
+            echo "password = 'kaiden123'" | sudo tee -a /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml > /dev/null || true
           fi
+
+      - name: RustDesk Debug Dump (Diag Info)
+        if: always()
+        run: |
+          echo "=== RUSTDESK CONFIGURATION DUMP ==="
+          echo "--- User Config ---"
+          ls -la ~/Library/Preferences/com.carriez.RustDesk/ 2>/dev/null || echo "Dir not found"
+          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml 2>/dev/null || echo "File not found"
+          
+          echo ""
+          echo "--- Root Config ---"
+          sudo ls -la /var/root/Library/Preferences/com.carriez.RustDesk/ 2>/dev/null || echo "Dir not found"
+          sudo cat /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml 2>/dev/null || echo "File not found"
+          
+          echo ""
+          echo "--- Socket Status ---"
+          ls -l /tmp/rustdesk/ 2>/dev/null || echo "Socket dir not found"
+          
+          echo ""
+          echo "--- Log Excerpt ---"
+          tail -30 /tmp/rustdesk_syslog.log 2>/dev/null || echo "Log file not found"
 
       - name: Install Tailscale
         env:
@@ -269,10 +305,11 @@ jobs:
           │  OPTION 2: RUSTDESK (ID Available)                            │
           ├──────────────────────────────────────────────────────────────┤
           │  ID: $RUSTDESK_ID
-          │  Password: kaiden123 (If CLI failed, try no password or set manually)│
+          │  Password: kaiden123                                         │
           │                                                              │
           │  Direct IP (Works even if ID fails):                          │
-          │  Enter this IP in RustDesk: $TAILSCALE_IP
+          │  Enter this IP in RustDesk: $TAILSCALE_IP                     │
+          │  (Try using IP if ID connection fails)                       │
           └──────────────────────────────────────────────────────────────┘
 
           ┌──────────────────────────────────────────────────────────────┐
