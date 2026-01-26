@@ -157,9 +157,14 @@ jobs:
           echo "---------------------------------------------------"
           echo "Waiting for IPC Socket (max 45s)..."
           
+          # Ensure the socket directory has correct permissions so we can check for the file
+          sudo mkdir -p /tmp/rustdesk
+          sudo chmod 777 /tmp/rustdesk
+          
           # Wait for the specific socket file that the CLI needs to communicate
           for i in {1..45}; do
-            if [ -S "$SOCKET_PATH" ]; then
+            # Use sudo to check for the socket because the service runs as root
+            if sudo test -S "$SOCKET_PATH"; then
               echo "✅ Socket detected at $SOCKET_PATH"
               break
             fi
@@ -189,8 +194,8 @@ jobs:
           
           echo ""
           echo "=== Setting Password ==="
-          # Only try if socket exists
-          if [ -S "$SOCKET_PATH" ]; then
+          # Only try if socket exists (checking with sudo as per previous loop)
+          if sudo test -S "$SOCKET_PATH"; then
             # Sometimes keychain needs a prod
             sudo security unlock-keychain -p '' /var/root/Library/Keychains/login.keychain-db 2>/dev/null || true
             
@@ -231,7 +236,7 @@ jobs:
 
       - name: Connection Info
         run: |
-          cat << 'EOF'
+          cat << EOF
           
           ╔══════════════════════════════════════════════════════════════╗
           ║           macOS REMOTE DESKTOP - CONNECTION INFO             ║
@@ -256,25 +261,25 @@ jobs:
             echo "│  (Check logs above for port status)                         │"
           fi
           
-          cat << 'EOF'
+          cat << EOF
           │  Password: kaiden123                                         │
           └──────────────────────────────────────────────────────────────┘
 
           ┌──────────────────────────────────────────────────────────────┐
           │  OPTION 2: RUSTDESK (ID Available)                            │
           ├──────────────────────────────────────────────────────────────┤
-          │  ID: $RUSTDESK_ID"
+          │  ID: $RUSTDESK_ID
           │  Password: kaiden123 (If CLI failed, try no password or set manually)│
           │                                                              │
-          │  Direct IP (Works even if ID fails):                          │"
-          │  Enter this IP in RustDesk: $TAILSCALE_IP"
+          │  Direct IP (Works even if ID fails):                          │
+          │  Enter this IP in RustDesk: $TAILSCALE_IP
           └──────────────────────────────────────────────────────────────┘
 
           ┌──────────────────────────────────────────────────────────────┐
           │  OPTION 3: SSH                                               │
           ├──────────────────────────────────────────────────────────────┤
-          │  ssh kaiden@$TAILSCALE_IP"
-          │  Password: kaiden123                                         │"
+          │  ssh kaiden@$TAILSCALE_IP
+          │  Password: kaiden123                                         │
           └──────────────────────────────────────────────────────────────┘
           
           EOF
