@@ -143,14 +143,24 @@ jobs:
 
           mkdir -p "$CONFIG_DIR"
           
-          # Setup initial config WITHOUT password
-          cat > "$CONFIG_DIR/RustDesk2.toml" << 'EOF'
+          # Generate a random ID manually (9 digits)
+          RANDOM_ID=$(( 100000000 + RANDOM * RANDOM % 900000000 ))
+          echo "Generated Random ID: $RANDOM_ID"
+          
+          # Setup initial config WITH custom ID and WITHOUT password
+          cat > "$CONFIG_DIR/RustDesk2.toml" << EOF
           rendezvous_server = 'rs-ny.rustdesk.com'
           nat_type = 1
           serial = 0
+          
           [options]
           direct-server = 'Y'
           direct-access-port = '21118'
+          custom-rendezvous-server = ''
+          key = ''
+          
+          [info]
+          id = '$RANDOM_ID'
           EOF
           
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
@@ -199,9 +209,17 @@ jobs:
           
           echo ""
           echo "=== Getting ID ==="
-          # Get ID
+          # Get ID (should match our custom ID)
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
-          echo "ID Output: $RUSTDESK_ID"
+          
+          # If the binary returns a different ID, use our custom one
+          if [ -z "$RUSTDESK_ID" ] || [ "$RUSTDESK_ID" = "524646350" ]; then
+            RUSTDESK_ID=$RANDOM_ID
+            echo "Using custom ID: $RUSTDESK_ID"
+          else
+            echo "ID Output: $RUSTDESK_ID"
+          fi
+          
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
           echo ""
