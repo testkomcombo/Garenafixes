@@ -1,4 +1,4 @@
-name: macOS Remote Desktop - Fixed
+name: macOS Remote Desktop
 
 on:
   workflow_dispatch:
@@ -25,211 +25,134 @@ jobs:
           
           # Disable sleep
           sudo pmset -c displaysleep 0 sleep 0 2>/dev/null || true
+          sudo pmset -b displaysleep 0 sleep 0 2>/dev/null || true
           caffeinate -d &
           
-          # Check display state BEFORE
-          echo "=== Display State BEFORE ==="
-          system_profiler SPDisplaysDataType 2>/dev/null | head -10 || echo "No displays"
+          echo "✅ System ready"
 
-      - name: Create Virtual Display (CGVirtualDisplay API)
+      - name: TCC Permissions (Your Working Version)
         run: |
-          echo "=== Creating Virtual Display ==="
+          echo "=== Setting up TCC ==="
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          # Create Swift program to create virtual display (macOS 14+)
-          cat > /tmp/create_display.swift << 'SWIFT'
-          import CoreGraphics
-          import Foundation
-
-          @available(macOS 14.0, *)
-          class VirtualDisplayManager {
-              var display: CGVirtualDisplay?
-              
-              func create() -> Bool {
-                  let descriptor = CGVirtualDisplayDescriptor()
-                  descriptor.name = "GitHub Actions Virtual"
-                  descriptor.maxPixelsWide = 1920
-                  descriptor.maxPixelsHigh = 1080
-                  descriptor.sizeInMillimeters = CGSize(width: 338.67, height: 190.5)
-                  descriptor.productID = 0x1234
-                  descriptor.vendorID = 0x5678
-                  descriptor.serialNum = UInt32(getpid())
-                  
-                  descriptor.queue = DispatchQueue.main
-                  descriptor.terminationHandler = { [weak self] d, e in
-                      print("Display terminated")
-                      self?.display = nil
-                  }
-                  
-                  guard let vd = CGVirtualDisplay(descriptor: descriptor) else {
-                      print("Failed to create CGVirtualDisplay")
-                      return false
-                  }
-                  
-                  let settings = CGVirtualDisplaySettings()
-                  settings.hiDPI = 0
-                  settings.modes = [
-                      CGVirtualDisplayMode(width: 1920, height: 1080, refreshRate: 60)!
-                  ]
-                  
-                  guard vd.apply(settings) else {
-                      print("Failed to apply settings")
-                      return false
-                  }
-                  
-                  self.display = vd
-                  print("SUCCESS: Virtual display created, ID: \(vd.displayID)")
-                  try? String(vd.displayID).write(toFile: "/tmp/virtual_display_id", atomically: true, encoding: .utf8)
-                  return true
-              }
-          }
-
-          if #available(macOS 14.0, *) {
-              let mgr = VirtualDisplayManager()
-              if mgr.create() {
-                  // Verify
-                  var count: UInt32 = 0
-                  var displays = [CGDirectDisplayID](repeating: 0, count: 10)
-                  CGGetActiveDisplayList(10, &displays, &count)
-                  print("Active displays: \(count)")
-                  RunLoop.main.run()
-              } else {
-                  print("FAILED")
-                  exit(1)
-              }
-          } else {
-              print("macOS < 14")
-              exit(1)
-          }
-          SWIFT
+          # Your working ARD permissions
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
           
-          # Compile
-          if swiftc -O - framework CoreGraphics -framework Foundation /tmp/create_display.swift -o /tmp/create_display 2>/dev/null; then
-              echo "Compiled successfully, starting virtual display..."
-              /tmp/create_display &
-              sleep 5
-              
-              if [ -f /tmp/virtual_display_id ]; then
-                  echo "✅ Virtual display active: ID $(cat /tmp/virtual_display_id)"
-              else
-                  echo "⚠️ Virtual display process running but no ID file"
-              fi
-          else
-              echo "Could not compile virtual display helper"
-          fi
+          # RustDesk permissions
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
           
-          # Check display state AFTER
-          echo "=== Display State AFTER ==="
-          system_profiler SPDisplaysDataType 2>/dev/null | head -10 || echo "No displays"
+          echo "✅ TCC done"
 
-      - name: ARD Kickstart (Creates Framebuffer)
+      - name: Setup ARD (Apple Remote Desktop)
         run: |
-          echo "=== ARD Kickstart to Create Framebuffer ==="
+          echo "=== Setting up ARD ==="
           
-          # This is CRITICAL - ARD kickstart creates the session framebuffer
-          sudo /System/Library*/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on -privs -all \
-            -configure -clientopts -setmenuextra -menuextra yes \
-            -restart -agent -menu 2>/dev/null || true
+          # VNC password
+          echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Also load screensharing
+          # Enable ARD
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw kaiden123 \
+            -allowAccessFor -allUsers -restart -agent -menu 2>&1 || true
+          
+          # Load screensharing
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
           sleep 3
           
-          # Verify ARD
-          echo "ARD Status:"
-          lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null && echo "Port 5900: Yes" || echo "Port 5900: No"
-          lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null && echo "Port 3283: Yes" || echo "Port 3283: No"
-
-      - name: TCC Permissions (With csreq Blob)
-        run: |
-          echo "=== Setting up TCC Permissions ==="
+          # Check ports
+          echo "ARD Ports:"
+          lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep LISTEN && echo "5900: YES" || echo "5900: NO"
+          lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep LISTEN && echo "3283: YES" || echo "3283: NO"
           
-          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          
-          # Generate csreq blob for RustDesk (code signing requirement)
-          REQ=$(codesign -d -r- /Applications/RustDesk.app 2>&1 | grep "designated =>" | sed 's/.*=> //')
-          if [ -n "$REQ" ]; then
-              echo "$REQ" | csreq -r- -b /tmp/rustdesk.csreq 2>/dev/null || true
-              if [ -f /tmp/rustdesk.csreq ]; then
-                  CSREQ_BLOB=$(xxd -p /tmp/rustdesk.csreq | tr -d '\n')
-                  echo "Generated csreq blob"
-              fi
+          # Set port variable
+          if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+            echo "VNC_PORT=5900" >> $GITHUB_ENV
+          elif lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+            echo "VNC_PORT=3283" >> $GITHUB_ENV
+          else
+            echo "VNC_PORT=5900" >> $GITHUB_ENV  # default
           fi
-          
-          # Insert permissions with csreq blob
-          BUNDLE="com.carriez.RustDesk"
-          BINARY="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
-          
-          # System TCC with 6-column format (compatible with GitHub runners)
-          for SERVICE in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServicePostEvent kTCCServiceListenEvent; do
-              # Bundle ID (client_type=0)
-              sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$SERVICE' AND client='$BUNDLE' AND client_type=0;" 2>/dev/null || true
-              sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$SERVICE','$BUNDLE',0,2,4,1);" 2>/dev/null || true
-              
-              # Binary path (client_type=1)
-              sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$SERVICE' AND client='$BINARY' AND client_type=1;" 2>/dev/null || true
-              sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$SERVICE','$BINARY',1,2,4,1);" 2>/dev/null || true
-          done
-          
-          # Also add provisioner
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/usr/local/opt/runner/provisioner/provisioner',1,2,4,1);" 2>/dev/null || true
-          
-          echo "✅ TCC permissions set"
 
-      - name: Install & Configure RustDesk
+      - name: Install RustDesk
         run: |
           echo "=== Installing RustDesk ==="
           brew install --cask rustdesk
-          sudo xattr -cr /Applications/RustDesk.app
-          sudo xattr -dr com.apple.quarantine /Applications/RustDesk.app 2>/dev/null || true
+          sudo xattr -cr /Applications/RustDesk.app 2>/dev/null || true
           
-          # Kill existing
-          sudo pkill -9 RustDesk 2>/dev/null || true
-          sleep 2
+          echo "✅ RustDesk installed"
+
+      - name: Generate RustDesk ID
+        run: |
+          echo "=== Generating ID ==="
           
-          # Clean configs
-          sudo rm -rf /var/root/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
-          rm -rf ~/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
-          
-          # Generate unique ID
+          # Download ID generator
           curl -sL -o /tmp/custom-rustdesk https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal
           chmod +x /tmp/custom-rustdesk
+          
+          # Get machine UUID and generate unique ID
           MACHINE_UUID=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | cut -d'"' -f4)
           UNIQUE_ID="${GITHUB_RUN_ID}$(openssl rand -hex 2)"
+          
+          # Generate encrypted ID
           ENC_ID=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1 | grep "encrypted to" | cut -d'"' -f4)
           
           echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
           [ -n "$ENC_ID" ] && echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
           
-          # Create config
+          echo "Generated: $UNIQUE_ID"
+          echo "Encrypted: ${ENC_ID:-'N/A'}"
+
+      - name: Configure RustDesk
+        run: |
+          echo "=== Configuring RustDesk ==="
+          
+          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          
+          # Kill existing
+          sudo pkill -9 RustDesk 2>/dev/null || true
+          launchctl unload ~/Library/LaunchAgents/com.carriez.* 2>/dev/null || true
+          sudo launchctl unload /Library/LaunchDaemons/com.carriez.* 2>/dev/null || true
+          sleep 2
+          
+          # Create directories (CRITICAL - ensure they exist)
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
+          mkdir -p ~/Library/Application\ Support/com.carriez.RustDesk
+          sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
+          sudo mkdir -p /var/root/Library/Application\ Support/com.carriez.RustDesk
+          
+          # Create config with password
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
           approve-mode = 'password'
           direct-server = 'Y'
-          direct-access-port = '21117'
+          direct-access-port = '21118'
           ${ENC_ID:+enc_id = '$ENC_ID'}
-          
-          [options]
-          allow-linux-headless = 'Y'
           EOF
           
+          # Copy to root location
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/ 2>/dev/null || true
+          sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml ~/Library/Application\ Support/com.carriez.RustDesk/ 2>/dev/null || true
+          
+          echo "✅ Config created"
 
-      - name: Launch RustDesk (Service + Server)
+      - name: Start RustDesk Services
         run: |
-          echo "=== Launching RustDesk ==="
+          echo "=== Starting RustDesk ==="
           
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
-          # Set password while creating framebuffer context
-          sudo "$RUSTDESK_BIN" --password kaiden123 2>&1 || true
-          sleep 2
-          
-          # Create LaunchDaemon for service (root)
+          # Create service plist (handles network/ID)
           sudo tee /Library/LaunchDaemons/com.carriez.RustDesk_service.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -252,7 +175,7 @@ jobs:
           </plist>
           EOF
           
-          # Create LaunchAgent for server (user) - CRITICAL: LimitLoadToSessionType
+          # Create server plist (handles screen capture)
           mkdir -p ~/Library/LaunchAgents
           tee ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -270,64 +193,32 @@ jobs:
             <true/>
             <key>RunAtLoad</key>
             <true/>
-            <key>LimitLoadToSessionType</key>
-            <array>
-              <string>Aqua</string>
-              <string>LoginWindow</string>
-              <string>Background</string>
-            </array>
-            <key>StandardOutPath</key>
-            <string>/tmp/rustdesk_server.log</string>
-            <key>StandardErrorPath</key>
-            <string>/tmp/rustdesk_server.error.log</string>
           </dict>
           </plist>
           EOF
           
-          # Load services
-          sudo launchctl load /Library/LaunchDaemons/com.carriez.RustDesk_service.plist 2>/dev/null || true
-          launchctl load ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist 2>/dev/null || true
-          sleep 5
-          
-          # FORCE SCREEN CAPTURE: Launch via osascript to ensure graphical context
-          osascript -e 'tell application "System Events" to do shell script "/Applications/RustDesk.app/Contents/MacOS/RustDesk --server &" with administrator privileges' 2>/dev/null || true
+          # Load service (system)
+          sudo launchctl load /Library/LaunchDaemons/com.carriez.RustDesk_service.plist 2>/dev/null || sudo launchctl bootstrap system /Library/LaunchDaemons/com.carriez.RustDesk_service.plist 2>/dev/null || true
           sleep 3
           
-          # Get final ID
-          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1 || echo "Error")
+          # Start server manually first (ensures it runs in current session)
+          "$RUSTDESK_BIN" --server &
+          SERVER_PID=$!
+          sleep 3
+          
+          # Set password while server is running
+          "$RUSTDESK_BIN" --password kaiden123 2>&1 || echo "Password command attempted"
+          sleep 2
+          
+          # Now load the LaunchAgent
+          launchctl load ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist 2>/dev/null || true
+          
+          # Get ID
+          sleep 2
+          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
-          # Verify process
-          ps aux | grep -i "rustdesk.*--server" | grep -v grep || echo "Server process not found"
-          
-          echo "✅ RustDesk ID: $RUSTDESK_ID"
-
-      - name: Test Screen Capture
-        run: |
-          echo "=== Testing Screen Capture ==="
-          
-          # Test 1: screencapture
-          screencapture -x /tmp/test_screen.png 2>/dev/null
-          if [ -s /tmp/test_screen.png ]; then
-              ls -la /tmp/test_screen.png
-              echo "✅ screencapture works"
-          else
-              echo "❌ screencapture failed"
-          fi
-          
-          # Test 2: Swift CGDisplay test
-          cat > /tmp/test_capture.swift << 'SWIFT'
-          import CoreGraphics
-          import Foundation
-          let id = CGMainDisplayID()
-          print("Display ID: \(id), Online: \(CGDisplayIsOnline(id))")
-          if let img = CGDisplayCreateImage(id) {
-              print("✅ CGDisplayCreateImage SUCCESS: \(img.width)x\(img.height)")
-          } else {
-              print("❌ CGDisplayCreateImage returned nil")
-          }
-          SWIFT
-          swiftc /tmp/test_capture.swift -o /tmp/test_capture 2>/dev/null && /tmp/test_capture || echo "Swift test failed"
+          echo "✅ RustDesk started - ID: $RUSTDESK_ID"
 
       - name: Setup Tailscale
         env:
@@ -345,32 +236,35 @@ jobs:
       - name: Connection Info
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════════╗"
-          echo "║                    CONNECTION INFORMATION                        ║"
-          echo "╚══════════════════════════════════════════════════════════════════╝"
-          echo "  Tailscale IP: ${{ env.TAILSCALE_IP }}"
-          echo "  Username: kaiden | Password: kaiden123"
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║                 CONNECTION INFORMATION                     ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
           echo ""
-          echo "  ARD: ${{ env.TAILSCALE_IP }}:5900 or :3283"
-          echo "  RustDesk ID: ${{ env.RUSTDESK_ID }}"
-          echo "  RustDesk Direct: ${{ env.TAILSCALE_IP }}:21117"
+          echo "  Tailscale IP: ${{ env.TAILSCALE_IP }}"
+          echo "  Username: kaiden"
+          echo "  Password: kaiden123"
+          echo ""
+          echo "  ARD (VNC):"
+          echo "    ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT }}"
+          echo ""
+          echo "  RustDesk:"
+          echo "    ID: ${{ env.RUSTDESK_ID }}"
+          echo "    Password: kaiden123"
           echo ""
 
-      - name: Keep Alive & Monitor
+      - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date +%H:%M:%S)] Checking..."
+            echo "[$(date +%H:%M:%S)] ${{ env.TAILSCALE_IP }} | ARD:${{ env.VNC_PORT }} | RustDesk:${{ env.RUSTDESK_ID }}"
             
-            # Restart virtual display if needed
-            if [ -f /tmp/create_display ]; ] && ! pgrep -f "create_display" > /dev/null; then
-                echo "Restarting virtual display..."
-                /tmp/create_display > /tmp/vdisplay.log 2>&1 &
+            # Check ARD
+            if ! lsof -iTCP:${{ env.VNC_PORT }} -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
             fi
             
             # Check RustDesk
-            if ! pgrep -f "RustDesk.*--server" > /dev/null; then
-                echo "Restarting RustDesk server..."
-                launchctl kickstart -k gui/$(id -u)/com.carriez.RustDesk_server 2>/dev/null || true
+            if ! pgrep -f "RustDesk --server" > /dev/null; then
+              launchctl start com.carriez.RustDesk_server 2>/dev/null || true
             fi
             
             caffeinate -d -t 300 2>/dev/null &
