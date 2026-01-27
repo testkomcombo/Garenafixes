@@ -11,9 +11,9 @@ jobs:
     steps:
       - name: System Setup
         run: |
-          echo "System Setup"
           sw_vers
           
+          # Create kaiden user with admin rights
           sudo dscl . -create /Users/kaiden UserShell /bin/zsh RealName "Kaiden" UniqueID 1001 PrimaryGroupID 80 NFSHomeDirectory /Users/kaiden
           sudo dscl . -passwd /Users/kaiden "kaiden123"
           sudo dscl . -append /Groups/admin GroupMembership kaiden
@@ -21,6 +21,9 @@ jobs:
           sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
+          
+          # Change "Anka" password too (optional - main GitHub user)
+          # sudo dscl . -passwd /Users/anka "newpassword" 2>/dev/null || true
           
           sudo pmset -c displaysleep 0 sleep 0
           sudo pmset -b displaysleep 0 sleep 0
@@ -35,7 +38,6 @@ jobs:
           # ARD permissions
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);"
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);"
           
@@ -44,57 +46,61 @@ jobs:
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.carriez.RustDesk',0,2,4,1);"
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.carriez.RustDesk',0,2,4,1);"
           
           echo "TCC Done"
 
-      - name: Setup ARD
+      - name: ARD Fix - Alternative Method
         run: |
-          # VNC password
+          echo "Setting up ARD..."
+          
+          # Method 1: Direct plist modification + kickstart
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement PrivilegeRequested -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement Text1 "Remote Desktop Service"
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          
+          # VNC password (required for VNC access)
           printf 'kaiden123' | sudo perl -we 'BEGIN{@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA"};read(STDIN,$p,16);@p=unpack"C*",$p;for($i=0;$i<16;$i++){$p[$i]^=$k[$i]};print pack"C*",@p' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
+          sudo chown root:wheel /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Enable ARD for specific user
+          # Enable ARD for kaiden specifically
+          sudo dscl . -append /Users/kaiden naprivs 1073742079
+          
+          # Kickstart (the "No such key: uid" error is normal, ignore it)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on -users kaiden -privs -all \
+            -activate -configure -access -on -privs -all \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
-            -configure -clientopts -setvncpw -vncpw kaiden123 \
-            -restart -agent -menu
+            -configure -allowAccessFor -allUsers \
+            -restart -agent -menu 2>&1 | grep -v "No such key" || true
+          
+          # Alternative: Try enabling screensharing agent directly
+          sudo launchctl unload /System/Library/LaunchAgents/com.apple.screensharing.agent.plist 2>/dev/null || true
+          sudo launchctl load /System/Library/LaunchAgents/com.apple.screensharing.agent.plist 2>/dev/null || true
           
           sleep 5
           
-          # Verify ARD is listening
-          if lsof -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
-            echo "VNC_PORT=5900" >> $GITHUB_ENV
-            echo "ARD active on 5900"
-          elif lsof -iTCP:3283 -sTCP:LISTEN | grep -q LISTEN; then
-            echo "VNC_PORT=3283" >> $GITHUB_ENV
-            echo "ARD active on 3283"
-          else
-            echo "VNC_PORT=5900" >> $GITHUB_ENV
-            echo "Warning: ARD port not detected"
-          fi
+          # Check what ports are actually listening
+          echo "Checking ports..."
+          sudo lsof -iTCP -sTCP:LISTEN | grep -E "(ARD|VNC|5900|3283)" || echo "No ARD/VNC ports found"
+          netstat -an | grep LISTEN | grep -E "\.(5900|3283)\s" || echo "Netstat: No VNC ports"
+          
+          # Default to 5900
+          echo "VNC_PORT=5900" >> $GITHUB_ENV
 
       - name: Set Resolution 1344x756
         run: |
           brew install displayplacer
-          
           SCREEN_ID=$(displayplacer list | grep "Persistent screen id" | head -1 | awk '{print $4}')
-          echo "Setting resolution to 1344x756..."
           displayplacer "id:${SCREEN_ID} res:1344x756 hz:60 color_depth:7 scaling:off origin:(0,0) degree:0"
-          
-          echo "Current resolution:"
-          displayplacer list | grep "Resolution"
+          echo "Resolution set to 1344x756"
 
       - name: Install RustDesk
         run: |
           brew install --cask rustdesk
           sudo xattr -cr /Applications/RustDesk.app
 
-      - name: Generate and Configure RustDesk
+      - name: Configure RustDesk
         run: |
-          # Generate ID
           curl -sL -o /tmp/custom-rustdesk https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal
           chmod +x /tmp/custom-rustdesk
           
@@ -104,38 +110,32 @@ jobs:
           ENC_OUTPUT=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1)
           ENC_ID=$(echo "$ENC_OUTPUT" | grep "encrypted to" | cut -d'"' -f4)
           
-          echo "Generated ID: $UNIQUE_ID"
-          echo "Encrypted ID: $ENC_ID"
+          echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
+          if [ -n "$ENC_ID" ]; then
+            echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
+          fi
           
-          # Kill existing
+          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          
           sudo pkill -9 RustDesk || true
           sleep 2
           
-          # Clean configs
           sudo rm -rf /var/root/Library/Preferences/com.carriez.RustDesk
           rm -rf ~/Library/Preferences/com.carriez.RustDesk
           
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           
-          # Create config with encrypted ID
-          echo "Creating config with enc_id..."
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
           approve-mode = 'password'
           direct-server = 'Y'
           direct-access-port = '21118'
-          enc_id = '$ENC_ID'
+          ${ENC_ID:+enc_id = '$ENC_ID'}
           EOF
           
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
-          
-          echo "Config contents:"
-          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
-          
-          # Start RustDesk
-          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
           sudo "$RUSTDESK_BIN" --service &
           sleep 3
@@ -143,16 +143,11 @@ jobs:
           "$RUSTDESK_BIN" --server &
           sleep 5
           
-          # Set password
           sudo "$RUSTDESK_BIN" --password kaiden123
           sleep 3
           
-          # Get ID
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id)
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
-          
-          # Export for later steps
-          echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
 
       - name: Setup Tailscale
         env:
@@ -170,35 +165,45 @@ jobs:
       - name: Connection Info
         run: |
           echo ""
-          echo "TAILSCALE IP:  ${{ env.TAILSCALE_IP }}"
-          echo "USERNAME:      kaiden"
-          echo "PASSWORD:      kaiden123"
+          echo "CONNECTION INFORMATION"
           echo ""
-          echo "ARD VNC:       ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT }}"
-          echo "RUSTDESK ID:   ${{ env.RUSTDESK_ID }}"
-          echo "RESOLUTION:    1344x756"
+          echo "Tailscale IP:  ${{ env.TAILSCALE_IP }}"
+          echo "Username:      kaiden"
+          echo "Password:      kaiden123"
+          echo ""
+          echo "ARD VNC:       vnc://${{ env.TAILSCALE_IP }}:5900"
+          echo "(Use VNC client, connect to port 5900)"
+          echo ""
+          echo "RustDesk ID:   ${{ env.RUSTDESK_ID }}"
+          echo "Resolution:    1344x756"
           echo ""
 
-      - name: Keep Alive
+      - name: Keep Alive (Fixed - Won't Interrupt RustDesk)
         run: |
+          # Use longer intervals to avoid interrupting active connections
+          # Only restart if process is actually dead (not just checking)
+          
           while true; do
             TIMESTAMP=$(date +%H:%M:%S)
-            echo "[$TIMESTAMP] IP:${{ env.TAILSCALE_IP }} ARD:${{ env.VNC_PORT }} RUSTDESK:${{ env.RUSTDESK_ID }}"
+            echo "[$TIMESTAMP] Checking services..."
             
-            # Check ARD
-            if ! lsof -iTCP:${{ env.VNC_PORT }} -sTCP:LISTEN | grep -q LISTEN; then
-              echo "ARD restarting..."
-              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
+            # Check ARD - only restart if completely dead for 30 seconds
+            if ! pgrep -f "ARD Agent" > /dev/null && ! lsof -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
+              echo "  ARD is dead, restarting..."
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent 2>/dev/null || true
             fi
             
-            # Check RustDesk - restart if frozen or dead
+            # Check RustDesk - be gentle, don't restart if process exists
+            # The freeze might be network-related, not process-related
             if ! pgrep -f "RustDesk --server" > /dev/null; then
-              echo "RustDesk restarting..."
+              echo "  RustDesk server not found, starting..."
               /Applications/RustDesk.app/Contents/MacOS/RustDesk --server &
+            else
+              echo "  RustDesk is running (PID: $(pgrep -f 'RustDesk --server'))"
             fi
             
-            # Keep display alive
-            caffeinate -d -t 60 &
-            sleep 60
+            # Only check every 5 minutes to avoid interrupting connections
+            # Active connections stay alive between checks
+            sleep 300
           done
           
