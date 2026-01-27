@@ -9,12 +9,12 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: System Setup & Auto Login (CRITICAL)
+      - name: System Setup
         run: |
-          echo "=== Setting up system ==="
+          echo "=== macOS Setup ==="
           sw_vers
           
-          # Create admin user first
+          # Create admin user
           sudo dscl . -create /Users/kaiden UserShell /bin/zsh RealName "Kaiden" UniqueID 1001 PrimaryGroupID 80 NFSHomeDirectory /Users/kaiden
           sudo dscl . -passwd /Users/kaiden "kaiden123"
           sudo dscl . -append /Groups/admin GroupMembership kaiden
@@ -24,155 +24,93 @@ jobs:
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           sudo chmod 440 /etc/sudoers.d/kaiden
           
-          # CRITICAL: Enable automatic login to create GUI session
-          echo "=== Enabling automatic login ==="
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser -string "kaiden"
-          
-          # Create kcpassword file with obfuscated password
-          # Magic bytes for XOR obfuscation
-          KEY=(0x7d 0x89 0x52 0x23 0xd2 0xbc 0xdd 0xea 0xa3 0xb9 0x1f)
-          PASSWORD="kaiden123"
-          PASS_LEN=${#PASSWORD}
-          
-          # Calculate padded length (multiple of 12)
-          PADDED_LEN=$(( ((PASS_LEN + 11) / 12) * 12 ))
-          
-          # Create obfuscated password using XOR
-          python3 << PYEOF
-          import sys
-          key = [0x7d, 0x89, 0x52, 0x23, 0xd2, 0xbc, 0xdd, 0xea, 0xa3, 0xb9, 0x1f]
-          password = "kaiden123"
-          padded_len = ((len(password) + 11) // 12) * 12
-          
-          # Convert to bytes
-          pw_bytes = password.encode('utf-8') + bytes([0x00])  # Add null terminator
-          
-          # Pad with random bytes to reach multiple of 12
-          import random
-          padded = pw_bytes + bytes([random.randint(0, 255) for _ in range(padded_len - len(pw_bytes))])
-          
-          # XOR with key
-          obfuscated = bytearray()
-          for i, byte in enumerate(padded):
-              obfuscated.append(byte ^ key[i % len(key)])
-          
-          # Write to file
-          with open('/tmp/kcpassword', 'wb') as f:
-              f.write(obfuscated)
-          PYEOF
-          
-          sudo cp /tmp/kcpassword /etc/kcpassword
-          sudo chmod 600 /etc/kcpassword
-          
           # Prevent sleep
           sudo pmset -c displaysleep 0 sleep 0 2>/dev/null || true
           sudo pmset -b displaysleep 0 sleep 0 2>/dev/null || true
+
+      - name: Install BetterDisplay & Create Virtual Display (FIXES BLACK SCREEN)
+        run: |
+          echo "=== Installing BetterDisplay ==="
+          brew install --cask betterdisplay
           
-          echo "✅ Auto login enabled for kaiden"
+          echo "=== Creating Virtual Display ==="
+          # BetterDisplay CLI is included in the app bundle
+          BETTER_DISPLAY="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
+          
+          # Wait for app to be ready
+          sleep 2
+          
+          # Create a virtual screen (16:9 aspect ratio, 1920x1080)
+          "$BETTER_DISPLAY" create -devicetype=virtualscreen -virtualscreenname=VirtualDisplay -aspectWidth=16 -aspectHeight=9 -width=1920 -height=1080
+          
+          sleep 2
+          
+          # Connect/activate the virtual screen
+          "$BETTER_DISPLAY" set -namelike=VirtualDisplay -connected=on
+          
+          echo "✅ Virtual display created and connected"
+          
+          # Keep virtual display alive
+          caffeinate -d &
+          
+          # Verify display exists
+          sleep 2
+          system_profiler SPDisplaysDataType | grep -i "virtual\|resolution" || true
 
       - name: Configure TCC Permissions
         run: |
-          echo "=== Configuring TCC permissions ==="
-          
+          echo "=== Setting up TCC permissions ==="
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          
-          # Get macOS version for schema
-          MACOS_VERSION=$(sw_vers -productVersion | cut -d. -f1)
-          
-          # Build insert statement based on version
-          if [[ "$MACOS_VERSION" -ge 14 ]]; then
-            # macOS 14+ has 17 columns
-            insert_tcc() {
-              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('$1','$2',$3,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s),NULL,NULL,'UNUSED',$(date +%s));" 2>/dev/null || true
-            }
-          else
-            # macOS 13 has 13 columns
-            insert_tcc() {
-              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('$1','$2',$3,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
-            }
-          fi
           
           # ARD permissions
           for client in com.apple.screensharing.agent com.apple.RemoteDesktop.agent com.apple.RemoteDesktop; do
-            insert_tcc "kTCCServiceScreenCapture" "$client" 0
-            insert_tcc "kTCCServicePostEvent" "$client" 0
-            insert_tcc "kTCCServiceAccessibility" "$client" 0
+            for service in kTCCServiceScreenCapture kTCCServicePostEvent kTCCServiceAccessibility; do
+              sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$service' AND client='$client';" 2>/dev/null || true
+              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('$service','$client',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
+            done
           done
           
-          # GitHub Actions provisioner (critical)
-          insert_tcc "kTCCServiceScreenCapture" "/usr/local/opt/runner/provisioner/provisioner" 1
-          insert_tcc "kTCCServiceScreenCapture" "/opt/off/opt/runner/provisioner/provisioner" 1
+          # GitHub provisioner
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','/usr/local/opt/runner/provisioner/provisioner',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
           
-          echo "✅ TCC configured"
-
-      - name: Configure Apple Remote Desktop
-        run: |
-          echo "=== Setting up ARD ==="
-          
-          # VNC password
-          echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
-          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
-          
-          # Load screensharing daemon
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sleep 2
-          
-          # Configure ARD
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw kaiden123 \
-            -allowAccessFor -allUsers -restart -agent -menu 2>/dev/null || true
-          
-          # Check port
-          for i in {1..15}; do
-            if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-              echo "VNC_PORT=5900" >> $GITHUB_ENV
-              echo "✅ ARD on port 5900"
-              break
-            fi
-            if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
-              echo "VNC_PORT=3283" >> $GITHUB_ENV
-              echo "✅ ARD on port 3283"
-              break
-            fi
-            sleep 2
+          # RustDesk permissions
+          for service in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServicePostEvent; do
+            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$service' AND client='com.carriez.RustDesk';" 2>/dev/null || true
+            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('$service','com.carriez.RustDesk',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
+            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$service' AND client='/Applications/RustDesk.app/Contents/MacOS/RustDesk';" 2>/dev/null || true
+            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('$service','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
           done
           
-          # Keep display alive
-          caffeinate -d -t 36000 &
-          
-          echo "✅ ARD configured"
+          echo "✅ TCC permissions set"
 
-      - name: Install RustDesk
+      - name: Install & Configure RustDesk
         run: |
+          echo "=== Installing RustDesk ==="
           brew install --cask rustdesk
           sudo xattr -cr /Applications/RustDesk.app
           sudo xattr -dr com.apple.quarantine /Applications/RustDesk.app 2>/dev/null || true
-
-      - name: Generate Unique RustDesk ID
-        run: |
+          
+          # Generate unique ID
           curl -sL -o /tmp/custom-rustdesk https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal
           chmod +x /tmp/custom-rustdesk
           MACHINE_UUID=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | cut -d'"' -f4)
           UNIQUE_ID="${GITHUB_RUN_ID}$(openssl rand -hex 2)"
           ENC_ID=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1 | grep "encrypted to" | cut -d'"' -f4)
+          
           echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
           [ -n "$ENC_ID" ] && echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
-
-      - name: Configure RustDesk
-        run: |
+          
+          # Configure RustDesk
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
           # Kill existing
           sudo pkill -9 RustDesk 2>/dev/null || true
-          launchctl unload ~/Library/LaunchAgents/com.carriez.* 2>/dev/null || true
-          sudo launchctl unload /Library/LaunchDaemons/com.carriez.* 2>/dev/null || true
-          sleep 2
+          sleep 1
           
-          # Clean and create directories
+          # Clean configs
           sudo rm -rf /var/root/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
           rm -rf ~/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
+          
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           
@@ -187,9 +125,8 @@ jobs:
           EOF
           
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
-          sudo chown -R root:wheel /var/root/Library/Preferences/com.carriez.RustDesk
           
-          # Create services
+          # Create LaunchDaemon
           sudo tee /Library/LaunchDaemons/com.carriez.RustDesk_service.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -212,6 +149,7 @@ jobs:
           </plist>
           EOF
           
+          # Create LaunchAgent
           mkdir -p ~/Library/LaunchAgents
           tee ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -247,9 +185,44 @@ jobs:
           sudo "$RUSTDESK_BIN" --password kaiden123
           sleep 3
           
+          # Get ID
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           echo "✅ RustDesk ID: $RUSTDESK_ID"
+
+      - name: Configure Apple Remote Desktop
+        run: |
+          echo "Setting up ARD..."
+          
+          # VNC password
+          echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
+          
+          # Load screensharing
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          sleep 2
+          
+          # Configure ARD
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw kaiden123 \
+            -allowAccessFor -allUsers -restart -agent -menu 2>/dev/null || true
+          
+          # Check port
+          for i in {1..10}; do
+            if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              echo "VNC_PORT=5900" >> $GITHUB_ENV
+              echo "✅ ARD on 5900"
+              break
+            fi
+            if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              echo "VNC_PORT=3283" >> $GITHUB_ENV
+              echo "✅ ARD on 3283"
+              break
+            fi
+            sleep 2
+          done
 
       - name: Setup Tailscale
         env:
@@ -274,13 +247,13 @@ jobs:
           echo "  Username: kaiden | Password: kaiden123"
           echo ""
           echo "  ┌──────────────────────────────────────────────────────────────┐"
-          echo "  │  ARD (VNC) - NOW WITH VIRTUAL DISPLAY SUPPORT                │"
+          echo "  │  ARD (VNC) - WITH VIRTUAL DISPLAY                            │"
           echo "  ├──────────────────────────────────────────────────────────────┤"
           echo "  │  Address: ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT || '5900' }}                      │"
           echo "  │  Password: kaiden123                                         │"
           echo "  │                                                              │"
-          echo "  │  ⚠️  CRITICAL: Automatic login enabled. GUI session exists.  │"
-          echo "  │     ARD will create a virtual display on connection.         │"
+          echo "  │  ✅ Virtual display created via BetterDisplay                │"
+          echo "  │     Resolution: 1920x1080                                    │"
           echo "  └──────────────────────────────────────────────────────────────┘"
           echo ""
           echo "  ┌──────────────────────────────────────────────────────────────┐"
@@ -288,15 +261,29 @@ jobs:
           echo "  ├──────────────────────────────────────────────────────────────┤"
           echo "  │  ID: ${{ env.RUSTDESK_ID }}                                 │"
           echo "  │  Password: kaiden123                                         │"
-          echo "  │                                                              │"
-          echo "  │  Direct IP: Enter ${{ env.TAILSCALE_IP }} in ID field       │"
+          echo "  │  Direct IP: ${{ env.TAILSCALE_IP }}                         │"
           echo "  └──────────────────────────────────────────────────────────────┘"
           echo ""
 
-      - name: Keep Alive
+      - name: Keep Alive & Monitor
         run: |
           while true; do
-            echo "[$(date +%H:%M:%S)] ARD:${{ env.VNC_PORT || '5900' }} | RustDesk:${{ env.RUSTDESK_ID }} | IP:${{ env.TAILSCALE_IP }}"
+            echo "[$(date +%H:%M:%S)] Status Check:"
+            echo "  ARD: Port ${{ env.VNC_PORT || '5900' }}"
+            echo "  RustDesk: ${{ env.RUSTDESK_ID }}"
+            echo "  Virtual Display: Active (BetterDisplay)"
+            echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
+            
+            # Ensure virtual display stays active
+            BETTER_DISPLAY="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
+            if ! pgrep -f "BetterDisplay" > /dev/null; then
+              echo "  ⚠️  Restarting BetterDisplay..."
+              open -a BetterDisplay
+              sleep 2
+              "$BETTER_DISPLAY" set -namelike=VirtualDisplay -connected=on 2>/dev/null || true
+            fi
+            
+            # Keep display alive
             caffeinate -d -t 300 2>/dev/null &
             sleep 300
           done
