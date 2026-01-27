@@ -9,12 +9,12 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: System Setup
+      - name: System Setup & User
         run: |
           echo "=== macOS Setup ==="
           sw_vers
           
-          # Create admin user
+          # Create admin user (using your original credentials)
           sudo dscl . -create /Users/kaiden UserShell /bin/zsh RealName "Kaiden" UniqueID 1001 PrimaryGroupID 80 NFSHomeDirectory /Users/kaiden
           sudo dscl . -passwd /Users/kaiden "kaiden123"
           sudo dscl . -append /Groups/admin GroupMembership kaiden
@@ -24,80 +24,33 @@ jobs:
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           sudo chmod 440 /etc/sudoers.d/kaiden
           
-          # Prevent sleep
-          sudo pmset -c displaysleep 0 sleep 0 2>/dev/null || true
-          sudo pmset -b displaysleep 0 sleep 0 2>/dev/null || true
+          # Display settings (from your original)
+          sudo pmset -c displaysleep 0 2>/dev/null || true
 
-      - name: Create Virtual Display (BetterDisplay)
+      - name: Fix TCC Permissions (Your Original Working Version)
         run: |
-          echo "=== Installing BetterDisplay ==="
-          brew install --cask betterdisplay
-          brew install waydabber/betterdisplay/betterdisplaycli 2>/dev/null || true
-          
-          echo "=== Launching BetterDisplay ==="
-          # Remove quarantine
-          sudo xattr -dr com.apple.quarantine /Applications/BetterDisplay.app 2>/dev/null || true
-          
-          # Launch the app in background (REQUIRED before CLI works)
-          nohup /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay > /tmp/betterdisplay.log 2>&1 &
-          sleep 5
-          
-          # Verify app is running
-          if ! pgrep -f "BetterDisplay" > /dev/null; then
-            echo "Warning: BetterDisplay not running, trying open command..."
-            open -a BetterDisplay
-            sleep 5
-          fi
-          
-          echo "=== Creating Virtual Display ==="
-          # Create virtual screen using betterdisplaycli or embedded CLI
-          if command -v betterdisplaycli &> /dev/null; then
-            betterdisplaycli create -devicetype=virtualscreen -virtualscreenname=VirtualDisplay -aspectWidth=16 -aspectHeight=9 -width=1920 -height=1080
-            sleep 2
-            betterdisplaycli set -namelike=VirtualDisplay -connected=on
-          else
-            /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay create -devicetype=virtualscreen -virtualscreenname=VirtualDisplay -aspectWidth=16 -aspectHeight=9 -width=1920 -height=1080
-            sleep 2
-            /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay set -namelike=VirtualDisplay -connected=on
-          fi
-          
-          echo "✅ Virtual display created"
-          
-          # Keep BetterDisplay running
-          while ! pgrep -f "BetterDisplay" > /dev/null; do
-            echo "Waiting for BetterDisplay..."
-            sleep 2
-          done
-          
-      - name: Configure TCC Permissions
-        run: |
-          echo "=== Setting up TCC permissions ==="
+          echo "=== Configuring TCC Permissions ==="
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          # ARD permissions
-          for client in com.apple.screensharing.agent com.apple.RemoteDesktop.agent com.apple.RemoteDesktop; do
-            for service in kTCCServiceScreenCapture kTCCServicePostEvent kTCCServiceAccessibility; do
-              sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$service' AND client='$client';" 2>/dev/null || true
-              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('$service','$client',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
-            done
-          done
+          # Your original TCC commands that fixed black screen
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);" 2>/dev/null || true
           
-          # GitHub provisioner
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','/usr/local/opt/runner/provisioner/provisioner',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
+          # Also add provisioner (might be needed on GitHub runners)
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/usr/local/opt/runner/provisioner/provisioner',1,2,4,1);" 2>/dev/null || true
           
-          # RustDesk permissions
-          for service in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServicePostEvent; do
-            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$service' AND client='com.carriez.RustDesk';" 2>/dev/null || true
-            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('$service','com.carriez.RustDesk',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
-            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$service' AND client='/Applications/RustDesk.app/Contents/MacOS/RustDesk';" 2>/dev/null || true
-            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('$service','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
-          done
+          # RustDesk permissions using same format
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
           
-          echo "✅ TCC permissions set"
+          echo "✅ TCC permissions configured"
 
-      - name: Install & Configure RustDesk
+      - name: Install & Setup RustDesk
         run: |
-          echo "=== Installing RustDesk ==="
           brew install --cask rustdesk
           sudo xattr -cr /Applications/RustDesk.app
           sudo xattr -dr com.apple.quarantine /Applications/RustDesk.app 2>/dev/null || true
@@ -112,21 +65,24 @@ jobs:
           echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
           [ -n "$ENC_ID" ] && echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
           
-          # Configure RustDesk
+          # Setup RustDesk
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
           # Kill existing
           sudo pkill -9 RustDesk 2>/dev/null || true
-          sleep 1
+          launchctl unload ~/Library/LaunchAgents/com.carriez.* 2>/dev/null || true
+          sudo launchctl unload /Library/LaunchDaemons/com.carriez.* 2>/dev/null || true
+          sleep 2
           
           # Clean configs
           sudo rm -rf /var/root/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
           rm -rf ~/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
           
+          # Create config directories
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           
-          # Create config
+          # Create config with password
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
@@ -138,7 +94,7 @@ jobs:
           
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           
-          # Create LaunchDaemon
+          # Create LaunchDaemon (service)
           sudo tee /Library/LaunchDaemons/com.carriez.RustDesk_service.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -161,7 +117,7 @@ jobs:
           </plist>
           EOF
           
-          # Create LaunchAgent
+          # Create LaunchAgent (GUI server)
           mkdir -p ~/Library/LaunchAgents
           tee ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -193,44 +149,59 @@ jobs:
           launchctl load ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist 2>/dev/null || true
           sleep 5
           
-          # Set password
+          # Set password via CLI
           sudo "$RUSTDESK_BIN" --password kaiden123
           sleep 3
           
-          # Get ID
+          # Get RustDesk ID
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+          
           echo "✅ RustDesk ID: $RUSTDESK_ID"
 
       - name: Configure Apple Remote Desktop
         run: |
-          echo "Setting up ARD..."
+          echo "=== Setting up ARD ==="
           
-          # VNC password
-          echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          # VNC password (your original style)
+          echo "kaiden123" | sudo perl -we '
+            $pw = <STDIN>;
+            chomp $pw;
+            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
+            @p = unpack "C*", $pw;
+            foreach (0..length($pw)-1) {
+              $p[$_] ^= $k[$_];
+            }
+            print pack "C*", @p;
+          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
+          
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Load screensharing
+          # Load screensharing daemon
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           sleep 2
           
-          # Configure ARD
+          # Configure ARD with kickstart
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -privs -all \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw kaiden123 \
-            -allowAccessFor -allUsers -restart -agent -menu 2>/dev/null || true
+            -allowAccessFor -allUsers \
+            -restart -agent -menu 2>/dev/null || true
           
-          # Check port
+          # Check which port is active
           for i in {1..10}; do
             if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
               echo "VNC_PORT=5900" >> $GITHUB_ENV
-              echo "✅ ARD on 5900"
+              echo "✅ ARD on port 5900"
               break
             fi
             if lsof -iTCP:3283 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
               echo "VNC_PORT=3283" >> $GITHUB_ENV
-              echo "✅ ARD on 3283"
+              echo "✅ ARD on port 3283"
               break
             fi
             sleep 2
@@ -256,16 +227,14 @@ jobs:
           echo "║                    CONNECTION INFORMATION                        ║"
           echo "╚══════════════════════════════════════════════════════════════════╝"
           echo "  Tailscale IP: ${{ env.TAILSCALE_IP }}"
-          echo "  Username: kaiden | Password: kaiden123"
+          echo "  Username: kaiden"
+          echo "  Password: kaiden123"
           echo ""
           echo "  ┌──────────────────────────────────────────────────────────────┐"
-          echo "  │  ARD (VNC) - WITH VIRTUAL DISPLAY                            │"
+          echo "  │  ARD (Apple Remote Desktop) - USING ORIGINAL TCC FIX         │"
           echo "  ├──────────────────────────────────────────────────────────────┤"
           echo "  │  Address: ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT || '5900' }}                      │"
           echo "  │  Password: kaiden123                                         │"
-          echo "  │                                                              │"
-          echo "  │  ✅ Virtual display created via BetterDisplay                │"
-          echo "  │     Resolution: 1920x1080                                    │"
           echo "  └──────────────────────────────────────────────────────────────┘"
           echo ""
           echo "  ┌──────────────────────────────────────────────────────────────┐"
@@ -273,30 +242,20 @@ jobs:
           echo "  ├──────────────────────────────────────────────────────────────┤"
           echo "  │  ID: ${{ env.RUSTDESK_ID }}                                 │"
           echo "  │  Password: kaiden123                                         │"
-          echo "  │  Direct IP: ${{ env.TAILSCALE_IP }}                         │"
           echo "  └──────────────────────────────────────────────────────────────┘"
           echo ""
 
-      - name: Keep Alive & Monitor
+      - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date +%H:%M:%S)] Status Check:"
-            echo "  ARD: Port ${{ env.VNC_PORT || '5900' }}"
-            echo "  RustDesk: ${{ env.RUSTDESK_ID }}"
-            echo "  Virtual Display: Active (BetterDisplay)"
-            echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
+            echo "[$(date +%H:%M:%S)] ARD:${{ env.VNC_PORT || '5900' }} | RustDesk:${{ env.RUSTDESK_ID }} | IP:${{ env.TAILSCALE_IP }}"
             
-            # Ensure virtual display stays active
-            BETTER_DISPLAY="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
-            if ! pgrep -f "BetterDisplay" > /dev/null; then
-              echo "  ⚠️  Restarting BetterDisplay..."
-              open -a BetterDisplay
-              sleep 2
-              "$BETTER_DISPLAY" set -namelike=VirtualDisplay -connected=on 2>/dev/null || true
+            # Restart ARD if needed
+            if ! lsof -iTCP:${{ env.VNC_PORT || '5900' }} -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
             fi
             
-            # Keep display alive
-            caffeinate -d -t 300 2>/dev/null &
+            caffeinate -u -t 60 2>/dev/null &
             sleep 300
           done
           
