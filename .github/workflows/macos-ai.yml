@@ -14,7 +14,6 @@ jobs:
           echo "System Setup"
           sw_vers
           
-          # Create user
           sudo dscl . -create /Users/kaiden UserShell /bin/zsh RealName "Kaiden" UniqueID 1001 PrimaryGroupID 80 NFSHomeDirectory /Users/kaiden
           sudo dscl . -passwd /Users/kaiden "kaiden123"
           sudo dscl . -append /Groups/admin GroupMembership kaiden
@@ -23,29 +22,29 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # Disable sleep
           sudo pmset -c displaysleep 0 sleep 0
           sudo pmset -b displaysleep 0 sleep 0
           caffeinate -d &
           echo "Ready"
 
-      - name: TCC Permissions
+      - name: TCC Permissions (Full)
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          # ARD permissions (comprehensive)
+          # ARD comprehensive permissions
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/System/Library/CoreServices/RemoteManagement/ARDAgent.app',1,2,4,1);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/System/Library/CoreServices/RemoteManagement/AppleVNCServer.bundle',1,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.RemoteDesktop.agent',0,2,4,1);"
           
-          # RustDesk permissions (all needed)
+          # RustDesk permissions
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);"
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.carriez.RustDesk',0,2,4,1);"
           
@@ -57,16 +56,18 @@ jobs:
           echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Enable ARD
+          # Enable ARD with full options
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw kaiden123 \
             -allowAccessFor -allUsers -restart -agent -menu
           
+          # Also ensure screensharing is enabled
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setmenuextra -menuextra yes
+          
           sleep 3
           
-          # Check port
           if lsof -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
             echo "VNC_PORT=5900" >> $GITHUB_ENV
           elif lsof -iTCP:3283 -sTCP:LISTEN | grep -q LISTEN; then
@@ -75,20 +76,22 @@ jobs:
             echo "VNC_PORT=5900" >> $GITHUB_ENV
           fi
 
-      - name: Set Resolution
+      - name: Set Resolution (1280x720 16:9)
         run: |
-          # Try to set resolution using displayplacer
-          brew install displayplacer 2>/dev/null || true
+          brew install displayplacer
           
-          # Check current displays
-          echo "Current displays:"
-          displayplacer list 2>/dev/null || echo "displayplacer not available"
+          echo "Available resolutions:"
+          displayplacer list | grep "mode "
           
-          # Set resolution (may not work on headless, but try)
-          # Primary display is usually ID 1
-          displayplacer "id:1 res:1366x768 hz:60 color_depth:8 scaling:off" 2>/dev/null || echo "Resolution set via displayplacer or not available on headless"
+          # Get screen ID and set to 1280x720 (closest 16:9 to 1366x768)
+          SCREEN_ID=$(displayplacer list | grep "Persistent screen id" | head -1 | awk '{print $4}')
+          echo "Setting screen $SCREEN_ID to 1280x720..."
           
-          echo "Resolution: 1366x768 (target)"
+          # Try to set 1280x720 (mode 4 from your list)
+          displayplacer "id:${SCREEN_ID} res:1280x720 hz:60 color_depth:7 scaling:off origin:(0,0) degree:0" || echo "Could not set resolution"
+          
+          # Verify
+          displayplacer list | grep "Resolution"
 
       - name: Install RustDesk
         run: |
@@ -115,18 +118,15 @@ jobs:
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
-          # Kill existing
           sudo pkill -9 RustDesk || true
           sleep 2
           
-          # Clean configs
           sudo rm -rf /var/root/Library/Preferences/com.carriez.RustDesk
           rm -rf ~/Library/Preferences/com.carriez.RustDesk
           
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           
-          # Create config
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
@@ -138,14 +138,12 @@ jobs:
           
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           
-          # Start
           sudo "$RUSTDESK_BIN" --service &
           sleep 3
           
           "$RUSTDESK_BIN" --server &
           sleep 5
           
-          # Set password
           sudo "$RUSTDESK_BIN" --password kaiden123
           sleep 3
           
@@ -174,7 +172,7 @@ jobs:
           echo ""
           echo "ARD VNC:       ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT }}"
           echo "RUSTDESK ID:   ${{ env.RUSTDESK_ID }}"
-          echo "RESOLUTION:    1366x768 (16:9)"
+          echo "RESOLUTION:    1280x720 (16:9)"
           echo ""
 
       - name: Keep Alive
@@ -182,13 +180,11 @@ jobs:
           while true; do
             echo "[$(date +%H:%M:%S)] IP:${{ env.TAILSCALE_IP }} ARD:${{ env.VNC_PORT }} RUSTDESK:${{ env.RUSTDESK_ID }}"
             
-            # Check ARD
             if ! lsof -iTCP:${{ env.VNC_PORT }} -sTCP:LISTEN | grep -q LISTEN; then
               echo "ARD restart..."
               sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
             fi
             
-            # Check RustDesk
             if ! pgrep -f "RustDesk --server" > /dev/null; then
               echo "RustDesk restart..."
               /Applications/RustDesk.app/Contents/MacOS/RustDesk --server &
