@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: System Info & User Setup
+      - name: System Setup & User Creation
         run: |
           echo "=== macOS Version ==="
           sw_vers
@@ -25,60 +25,74 @@ jobs:
           sudo chmod 440 /etc/sudoers.d/kaiden
           
           # Prevent sleep
-          sudo pmset -c displaysleep 0 2>/dev/null || true
-          sudo pmset -b displaysleep 0 2>/dev/null || true
+          sudo pmset -c displaysleep 0
+          sudo pmset -b displaysleep 0
           caffeinate -d &
           
-          echo "✅ System ready"
+          echo "✅ User created"
 
-      - name: Configure TCC Permissions (CRITICAL - Must be first)
+      - name: Fix TCC Permissions (CRITICAL - Pre-install)
         run: |
           echo "=== Configuring TCC Database ==="
           
+          # Detect macOS version for correct column count
+          MACOS_VERSION=$(sw_vers -productVersion | cut -d. -f1)
+          echo "macOS Version: $MACOS_VERSION"
+          
+          # Build values string based on schema version
+          # macOS 14+ (Sonoma/Sequoia) has 17 columns, macOS 13 has 13 columns
+          if [[ "$MACOS_VERSION" -ge 14 ]]; then
+            # 17 columns: service, client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier, indirect_object_code_identity, flags, last_modified, pid, pid_version, boot_uuid, last_reminded
+            build_values() {
+              local service=$1 client=$2 type=$3
+              echo "'$service','$client',$type,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s),NULL,NULL,'UNUSED',$(date +%s)"
+            }
+          else
+            # 13 columns: service, client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier, indirect_object_code_identity, flags, last_modified
+            build_values() {
+              local service=$1 client=$2 type=$3
+              echo "'$service','$client',$type,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s)"
+            }
+          fi
+          
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          # --- ARD Permissions (Original Working Format) ---
-          ARD_CLIENTS=(
-            "com.apple.screensharing.agent"
-            "com.apple.RemoteDesktop.agent"
-            "com.apple.RemoteDesktop"
-          )
+          # Function to insert permission
+          insert_permission() {
+            local service=$1 client=$2 type=$3
+            local values=$(build_values "$service" "$client" "$type")
+            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='$service' AND client='$client' AND client_type=$type;" 2>/dev/null || true
+            sudo sqlite3 "$TCC_DB" "INSERT OR IGNORE INTO access VALUES($values);" 2>/dev/null || true
+          }
           
-          ARD_SERVICES=(
-            "kTCCServiceScreenCapture"
-            "kTCCServicePostEvent"
-            "kTCCServiceAccessibility"
-          )
+          # --- GitHub Actions Provisioner (REQUIRED for screen recording) ---
+          insert_permission "kTCCServiceScreenCapture" "/usr/local/opt/runner/provisioner/provisioner" 1
+          insert_permission "kTCCServiceScreenCapture" "/opt/off/opt/runner/provisioner/provisioner" 1
+          insert_permission "kTCCServicePostEvent" "/usr/local/opt/runner/provisioner/provisioner" 1
+          insert_permission "kTCCServiceAccessibility" "/usr/local/opt/runner/provisioner/provisioner" 1
           
-          for client in "${ARD_CLIENTS[@]}"; do
-            for service in "${ARD_SERVICES[@]}"; do
-              sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='$client' AND service='$service';" 2>/dev/null || true
-              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$service','$client',0,2,4,1);" 2>/dev/null || true
-            done
-          done
+          # --- ARD Permissions ---
+          insert_permission "kTCCServiceScreenCapture" "com.apple.screensharing.agent" 0
+          insert_permission "kTCCServiceScreenCapture" "com.apple.RemoteDesktop.agent" 0
+          insert_permission "kTCCServiceScreenCapture" "com.apple.RemoteDesktop" 0
+          insert_permission "kTCCServicePostEvent" "com.apple.screensharing.agent" 0
+          insert_permission "kTCCServicePostEvent" "com.apple.RemoteDesktop.agent" 0
+          insert_permission "kTCCServiceAccessibility" "com.apple.screensharing.agent" 0
           
-          # --- RustDesk Permissions ---
+          # --- RustDesk Permissions (bundle ID) ---
+          insert_permission "kTCCServiceScreenCapture" "com.carriez.RustDesk" 0
+          insert_permission "kTCCServicePostEvent" "com.carriez.RustDesk" 0
+          insert_permission "kTCCServiceAccessibility" "com.carriez.RustDesk" 0
+          insert_permission "kTCCServiceListenEvent" "com.carriez.RustDesk" 0
+          
+          # --- RustDesk Permissions (binary path) ---
+          insert_permission "kTCCServiceScreenCapture" "/Applications/RustDesk.app/Contents/MacOS/RustDesk" 1
+          insert_permission "kTCCServicePostEvent" "/Applications/RustDesk.app/Contents/MacOS/RustDesk" 1
+          insert_permission "kTCCServiceAccessibility" "/Applications/RustDesk.app/Contents/MacOS/RustDesk" 1
+          insert_permission "kTCCServiceListenEvent" "/Applications/RustDesk.app/Contents/MacOS/RustDesk" 1
+          
+          # Also reset to clear any corrupted entries
           sudo tccutil reset ScreenCapture com.carriez.RustDesk 2>/dev/null || true
-          sudo tccutil reset Accessibility com.carriez.RustDesk 2>/dev/null || true
-          
-          RD_SERVICES=(
-            "kTCCServiceScreenCapture"
-            "kTCCServiceAccessibility"
-            "kTCCServicePostEvent"
-            "kTCCServiceListenEvent"
-          )
-          
-          for service in "${RD_SERVICES[@]}"; do
-            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='com.carriez.RustDesk' AND service='$service';" 2>/dev/null || true
-            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$service','com.carriez.RustDesk',0,2,4,1);" 2>/dev/null || true
-          done
-          
-          # Also add binary path for RustDesk
-          BIN_PATH="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
-          for service in "${RD_SERVICES[@]}"; do
-            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='$BIN_PATH' AND service='$service';" 2>/dev/null || true
-            sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$service','$BIN_PATH',1,2,4,1);" 2>/dev/null || true
-          done
           
           echo "✅ TCC permissions configured"
 
@@ -91,34 +105,29 @@ jobs:
 
       - name: Generate Unique RustDesk ID
         run: |
-          # Download custom ID generator tool
           curl -sL -o /tmp/custom-rustdesk https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal
           chmod +x /tmp/custom-rustdesk
           
-          # Get machine UUID and generate unique ID
           MACHINE_UUID=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | cut -d'"' -f4)
           UNIQUE_ID="${GITHUB_RUN_ID}$(openssl rand -hex 2)"
           
-          # Generate encrypted ID
           ENC_ID=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1 | grep "encrypted to" | cut -d'"' -f4)
           
           echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
           [ -n "$ENC_ID" ] && echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
-          
           echo "Generated: $UNIQUE_ID"
-          echo "Encrypted: ${ENC_ID:-'None (will use default ID)'}"
 
       - name: Configure & Start RustDesk
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
-          # Kill any existing
+          # Kill existing
           sudo pkill -9 RustDesk 2>/dev/null || true
           launchctl unload ~/Library/LaunchAgents/com.carriez.* 2>/dev/null || true
           sudo launchctl unload /Library/LaunchDaemons/com.carriez.* 2>/dev/null || true
           sleep 2
           
-          # Clean old configs
+          # Clean configs
           sudo rm -rf /var/root/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
           rm -rf ~/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
           
@@ -126,7 +135,7 @@ jobs:
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           
-          # Create config with password AND direct IP enabled
+          # Create config with direct IP enabled
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
@@ -136,15 +145,14 @@ jobs:
           ${ENC_ID:+enc_id = '$ENC_ID'}
           
           [options]
-          allow-lan-discovery = 'Y'
           enable-direct-ip = 'Y'
+          allow-lan-discovery = 'Y'
           EOF
           
-          # Copy to root and set permissions
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           sudo chown -R root:wheel /var/root/Library/Preferences/com.carriez.RustDesk
           
-          # Create LaunchDaemon (system service)
+          # Create LaunchDaemon
           sudo tee /Library/LaunchDaemons/com.carriez.RustDesk_service.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -173,7 +181,7 @@ jobs:
           
           sudo chmod 644 /Library/LaunchDaemons/com.carriez.RustDesk_service.plist
           
-          # Create LaunchAgent (GUI server for user session)
+          # Create LaunchAgent
           mkdir -p ~/Library/LaunchAgents
           tee ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -212,49 +220,36 @@ jobs:
           
           sleep 5
           
-          # Set password via CLI (while service is running)
-          echo "Setting password..."
+          # Set password
           sudo "$RUSTDESK_BIN" --password kaiden123
           sleep 3
           
-          # Get ID
+          # Get final ID
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
-          
-          echo "✅ RustDesk ready - ID: $RUSTDESK_ID"
+          echo "✅ RustDesk ID: $RUSTDESK_ID"
 
-      - name: Setup Apple Remote Desktop
+      - name: Configure Apple Remote Desktop
         run: |
-          # Generate VNC password hash
-          echo "kaiden123" | sudo perl -we '
-            $pw = <STDIN>; chomp $pw;
-            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
-            @p = unpack "C*", $pw;
-            foreach (0..length($pw)-1) { $p[$_] ^= $k[$_]; }
-            print pack "C*", @p;
-          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
-          
+          # VNC password
+          echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Enable screensharing daemon
+          # Load screensharing daemon
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          # Configure ARD using kickstart
+          # Configure ARD
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure \
-            -access -on \
-            -privs -all \
+            -activate -configure -access -on -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw kaiden123 \
-            -allowAccessFor -allUsers \
-            -restart -agent -menu 2>/dev/null || true
+            -allowAccessFor -allUsers -restart -agent -menu 2>/dev/null || true
           
-          # Alternative command if kickstart partially fails
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -privs -all 2>/dev/null || true
+          # Additional kickstart to ensure it's active
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on 2>/dev/null || true
           
-          # Wait for port
-          for i in {1..15}; do
+          # Check port
+          for i in {1..10}; do
             if lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
               echo "VNC_PORT=5900" >> $GITHUB_ENV
               echo "✅ ARD on port 5900"
@@ -292,15 +287,18 @@ jobs:
           echo "║                    CONNECTION INFORMATION                        ║"
           echo "╚══════════════════════════════════════════════════════════════════╝"
           echo "  Tailscale IP: ${{ env.TAILSCALE_IP }}"
-          echo "  Username: kaiden"
-          echo "  Password: kaiden123"
+          echo "  Username: kaiden | Password: kaiden123"
           echo ""
           echo "┌──────────────────────────────────────────────────────────────────┐"
-          echo "│  OPTION 1: APPLE REMOTE DESKTOP (VNC) - Recommended              │"
+          echo "│  OPTION 1: APPLE REMOTE DESKTOP (Recommended)                    │"
           echo "├──────────────────────────────────────────────────────────────────┤"
-          echo "│  Address: ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT || '5900/3283' }}                          │"
+          echo "│  Address: ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT || '5900' }}  │"
           echo "│  Password: kaiden123                                             │"
-          echo "│  Note: Use standard VNC clients (Screen Sharing, RealVNC, etc)   │"
+          echo "│                                                                  │"
+          echo "│  Steps for ARD:                                                  │"
+          echo "│  1. Open 'Screen Sharing' app (or any VNC client)                │"
+          echo "│  2. Enter: vnc://${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT || '5900' }} │"
+          echo "│  3. Password: kaiden123                                          │"
           echo "└──────────────────────────────────────────────────────────────────┘"
           echo ""
           echo "┌──────────────────────────────────────────────────────────────────┐"
@@ -309,11 +307,13 @@ jobs:
           echo "│  ID: ${{ env.RUSTDESK_ID }}                                     │"
           echo "│  Password: kaiden123                                             │"
           echo "│                                                                  │"
-          echo "│  TO CONNECT BY IP (Direct):                                      │"
-          echo "│  1. Open RustDesk client on your machine                         │"
-          echo "│  2. Enter this IP instead of ID: ${{ env.TAILSCALE_IP }}        │"
-          echo "│  3. Click Connect                                                │"
-          echo "│  (Requires 'Enable direct IP access' setting - already enabled)  │"
+          echo "│  TO CONNECT VIA IP (Direct):                                     │"
+          echo "│  1. Open RustDesk client                                          │"
+          echo "│  2. Enter this IP in the ID field: ${{ env.TAILSCALE_IP }}      │"
+          echo "│  3. Click Connect → Enter password: kaiden123                    │"
+          echo "│                                                                  │"
+          echo "│  Note: Direct IP uses the same port (21118) but native           │"
+          echo "│  protocol, NOT WebSocket. WebSocket is for web client only.      │"
           echo "└──────────────────────────────────────────────────────────────────┘"
           echo ""
           echo "┌──────────────────────────────────────────────────────────────────┐"
@@ -324,27 +324,27 @@ jobs:
           echo "└──────────────────────────────────────────────────────────────────┘"
           echo ""
 
-      - name: Keep Alive & Health Check
+      - name: Keep Alive Monitor
         run: |
           while true; do
             TIMESTAMP=$(date '+%H:%M:%S')
             echo "[$TIMESTAMP] Health Check:"
             
-            # Check Tailscale
-            if pgrep -x tailscaled >/dev/null; then
-              echo "  ✅ Tailscale: ${{ env.TAILSCALE_IP }}"
-            else
-              echo "  ❌ Tailscale down"
-            fi
+            # Provisioner check (critical for screen recording)
+            pgrep -f provisioner >/dev/null && echo "  ✅ GitHub Provisioner" || echo "  ⚠️  Provisioner not found"
             
-            # Check ARD
+            # Tailscale
+            pgrep -x tailscaled >/dev/null && echo "  ✅ Tailscale: ${{ env.TAILSCALE_IP }}" || echo "  ❌ Tailscale down"
+            
+            # ARD
             if lsof -iTCP:${{ env.VNC_PORT || '5900' }} -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
               echo "  ✅ ARD: Port ${{ env.VNC_PORT || '5900' }}"
             else
-              echo "  ⚠️  ARD not listening on expected port"
+              echo "  ⚠️  ARD not listening"
+              sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
             fi
             
-            # Check RustDesk Service
+            # RustDesk Service (root)
             if pgrep -f "RustDesk --service" >/dev/null; then
               echo "  ✅ RustDesk Service"
             else
@@ -352,7 +352,7 @@ jobs:
               sudo launchctl start com.carriez.RustDesk_service 2>/dev/null || true
             fi
             
-            # Check RustDesk Server
+            # RustDesk Server (GUI/screen capture)
             if pgrep -f "RustDesk --server" >/dev/null; then
               echo "  ✅ RustDesk Server (Screen Capture)"
             else
@@ -360,16 +360,9 @@ jobs:
               launchctl start com.carriez.RustDesk_server 2>/dev/null || true
             fi
             
-            # Check RustDesk port
-            if lsof -iTCP:21118 -sTCP:LISTEN 2>/dev/null | grep -q rustdesk; then
-              echo "  ✅ RustDesk WebSocket: 21118"
-            else
-              echo "  ⚠️  RustDesk not on 21118"
-            fi
-            
             echo "--------------------------------------------------------"
             
-            # Keep display awake
+            # Keep display active
             caffeinate -d -t 300 2>/dev/null &
             sleep 300
           done
