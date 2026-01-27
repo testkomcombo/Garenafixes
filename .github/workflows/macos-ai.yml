@@ -1,4 +1,4 @@
-name: macOS Remote Desktop - Working
+name: macOS Remote Desktop
 
 on:
   workflow_dispatch:
@@ -14,7 +14,6 @@ jobs:
           echo "=== System Info ==="
           sw_vers
           
-          # Create user
           sudo dscl . -create /Users/kaiden UserShell /bin/zsh RealName "Kaiden" UniqueID 1001 PrimaryGroupID 80 NFSHomeDirectory /Users/kaiden
           sudo dscl . -passwd /Users/kaiden "kaiden123"
           sudo dscl . -append /Groups/admin GroupMembership kaiden
@@ -24,25 +23,22 @@ jobs:
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           sudo chmod 440 /etc/sudoers.d/kaiden
           
-          # Disable sleep
           sudo pmset -c displaysleep 0 sleep 0
           sudo pmset -b displaysleep 0 sleep 0
           caffeinate -d &
           
           echo "✅ System ready"
 
-      - name: TCC Permissions (Your Working Version)
+      - name: TCC Permissions
         run: |
           echo "=== Setting up TCC ==="
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          # ARD permissions that fixed black screen
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);"
           
-          # RustDesk permissions
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);"
@@ -51,15 +47,13 @@ jobs:
           
           echo "✅ TCC done"
 
-      - name: Setup ARD (Your Working Version)
+      - name: Setup ARD
         run: |
           echo "=== Setting up ARD ==="
           
-          # VNC password
           echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Enable ARD
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
@@ -68,7 +62,6 @@ jobs:
           
           sleep 3
           
-          # Check ports
           if lsof -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
             echo "VNC_PORT=5900" >> $GITHUB_ENV
           elif lsof -iTCP:3283 -sTCP:LISTEN | grep -q LISTEN; then
@@ -102,25 +95,21 @@ jobs:
             echo "Generated enc_id: $ENC_ID"
           fi
 
-      - name: Configure & Start RustDesk (THE WORKING VERSION)
+      - name: Configure & Start RustDesk
         run: |
           echo "=== Configuring RustDesk ==="
           
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
-          # Kill existing
           sudo pkill -9 RustDesk || echo "No processes to kill"
           sleep 2
           
-          # Clean configs
           sudo rm -rf /var/root/Library/Preferences/com.carriez.RustDesk
           rm -rf ~/Library/Preferences/com.carriez.RustDesk
           
-          # Create directories
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           
-          # Create config WITH password and enc_id
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
@@ -130,7 +119,6 @@ jobs:
           ${ENC_ID:+enc_id = '$ENC_ID'}
           EOF
           
-          # Copy to root
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           
           echo "Config created:"
@@ -138,29 +126,24 @@ jobs:
           
           echo "Starting RustDesk..."
           
-          # Start service (system)
           sudo "$RUSTDESK_BIN" --service &
           sleep 3
           
-          # Start server (user)
           "$RUSTDESK_BIN" --server &
           sleep 5
           
-          # Check processes
           ps aux | grep -i rustdesk | grep -v grep
           
-          # Set password (THIS WORKED BEFORE)
           echo "Setting password..."
           sudo "$RUSTDESK_BIN" --password kaiden123
           sleep 3
           
-          # Get ID
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id)
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           echo "ID: $RUSTDESK_ID"
           
-          echo "Final config:"
-          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
+          echo "Final config (using sudo to read):"
+          sudo cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml || cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
           
           echo "✅ RustDesk ready"
 
