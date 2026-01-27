@@ -13,17 +13,8 @@ jobs:
         run: |
           echo "=== System Info ==="
           sw_vers
-          echo ""
-          echo "=== Current User ==="
-          whoami
-          id
-          echo ""
-          echo "=== Home Directory ==="
-          echo "$HOME"
-          ls -la "$HOME"
           
           # Create user
-          echo "Creating user kaiden..."
           sudo dscl . -create /Users/kaiden UserShell /bin/zsh RealName "Kaiden" UniqueID 1001 PrimaryGroupID 80 NFSHomeDirectory /Users/kaiden
           sudo dscl . -passwd /Users/kaiden "kaiden123"
           sudo dscl . -append /Groups/admin GroupMembership kaiden
@@ -33,7 +24,6 @@ jobs:
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           sudo chmod 440 /etc/sudoers.d/kaiden
           
-          # Disable sleep
           sudo pmset -c displaysleep 0 sleep 0
           sudo pmset -b displaysleep 0 sleep 0
           caffeinate -d &
@@ -45,27 +35,16 @@ jobs:
           echo "=== Setting up TCC ==="
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          echo "TCC Database path: $TCC_DB"
-          ls -la "$TCC_DB"
-          
-          # ARD permissions
-          echo "Adding ARD permissions..."
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);"
           
-          # RustDesk permissions
-          echo "Adding RustDesk permissions..."
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.carriez.RustDesk',0,2,4,1);"
-          
-          # Verify
-          echo "=== Verifying TCC entries ==="
-          sudo sqlite3 "$TCC_DB" "SELECT service, client, auth_value FROM access WHERE client LIKE '%RustDesk%';"
           
           echo "✅ TCC done"
 
@@ -73,35 +52,29 @@ jobs:
         run: |
           echo "=== Setting up ARD ==="
           
-          # VNC password
           echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Enable ARD
-          echo "Running ARD kickstart..."
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw kaiden123 \
             -allowAccessFor -allUsers -restart -agent -menu
           
-          # Load screensharing
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
           
           sleep 3
           
-          # Check ports
           echo "ARD Port check:"
-          lsof -iTCP:5900 -sTCP:LISTEN | grep LISTEN && echo "Port 5900: YES" || echo "Port 5900: NO"
-          lsof -iTCP:3283 -sTCP:LISTEN | grep LISTEN && echo "Port 3283: YES" || echo "Port 3283: NO"
+          lsof -iTCP:5900 -sTCP:LISTEN | grep LISTEN && echo "5900: YES" || echo "5900: NO"
+          lsof -iTCP:3283 -sTCP:LISTEN | grep LISTEN && echo "3283: YES" || echo "3283: NO"
           
-          # Set port variable
           if lsof -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
             echo "VNC_PORT=5900" >> $GITHUB_ENV
           elif lsof -iTCP:3283 -sTCP:LISTEN | grep -q LISTEN; then
             echo "VNC_PORT=3283" >> $GITHUB_ENV
           else
-            echo "WARNING: Neither port 5900 nor 3283 is listening"
+            echo "WARNING: No ARD port listening"
             echo "VNC_PORT=5900" >> $GITHUB_ENV
           fi
 
@@ -110,26 +83,20 @@ jobs:
           echo "=== Installing RustDesk ==="
           brew install --cask rustdesk
           sudo xattr -cr /Applications/RustDesk.app
-          
-          echo "RustDesk installed at:"
-          ls -la /Applications/RustDesk.app/Contents/MacOS/
 
       - name: Generate RustDesk ID
         run: |
           echo "=== Generating ID ==="
           
-          # Download ID generator
           curl -sL -o /tmp/custom-rustdesk https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal
           chmod +x /tmp/custom-rustdesk
           
-          # Get machine UUID
           MACHINE_UUID=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | cut -d'"' -f4)
           echo "Machine UUID: $MACHINE_UUID"
           
           UNIQUE_ID="${GITHUB_RUN_ID}$(openssl rand -hex 2)"
           echo "Unique ID: $UNIQUE_ID"
           
-          # Generate encrypted ID
           ENC_OUTPUT=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1)
           echo "Custom tool output: $ENC_OUTPUT"
           
@@ -147,15 +114,13 @@ jobs:
           
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           echo "RustDesk binary: $RUSTDESK_BIN"
-          
-          # Check if binary exists
           ls -la "$RUSTDESK_BIN"
           
-          # Kill existing
+          # Kill existing (allow failure)
           echo "Killing existing RustDesk processes..."
-          sudo pkill -9 RustDesk
-          launchctl unload ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist
-          sudo launchctl unload /Library/LaunchDaemons/com.carriez.RustDesk_service.plist
+          sudo pkill -9 RustDesk || echo "No RustDesk processes to kill"
+          launchctl unload ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist 2>&1 || echo "No LaunchAgent to unload"
+          sudo launchctl unload /Library/LaunchDaemons/com.carriez.RustDesk_service.plist 2>&1 || echo "No LaunchDaemon to unload"
           sleep 2
           
           # Create directories
@@ -164,10 +129,6 @@ jobs:
           mkdir -p ~/Library/Application\ Support/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Application\ Support/com.carriez.RustDesk
-          
-          # List directories
-          echo "Directory listing:"
-          ls -la ~/Library/Preferences/ | grep -i rustdesk
           
           # Create config
           echo "Creating config file..."
@@ -187,12 +148,6 @@ jobs:
           cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml ~/Library/Application\ Support/com.carriez.RustDesk/
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Application\ Support/com.carriez.RustDesk/
-          
-          # Verify
-          echo "Files created:"
-          ls -la ~/Library/Preferences/com.carriez.RustDesk/
-          ls -la ~/Library/Application\ Support/com.carriez.RustDesk/
-          sudo ls -la /var/root/Library/Preferences/com.carriez.RustDesk/
           
           echo "✅ Config created"
 
@@ -232,7 +187,7 @@ jobs:
           
           sleep 3
           
-          # Start server in current session
+          # Start server
           echo "Starting RustDesk server..."
           "$RUSTDESK_BIN" --server &
           SERVER_PID=$!
@@ -240,15 +195,14 @@ jobs:
           
           sleep 5
           
-          # Check if process is running
+          # Check process
           echo "Checking server process..."
           ps aux | grep -i rustdesk | grep -v grep
           
           # Set password
           echo "Setting password..."
           "$RUSTDESK_BIN" --password kaiden123
-          PASSWORD_RESULT=$?
-          echo "Password command exit code: $PASSWORD_RESULT"
+          echo "Password command exit code: $?"
           
           sleep 3
           
@@ -258,13 +212,13 @@ jobs:
           echo "Raw ID output: $RUSTDESK_ID"
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
-          # Check config was updated
+          # Check config
           echo "Config after password set:"
           cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
           
-          # Check if password file exists
-          echo "Looking for password-related files..."
-          find ~/Library -name "*RustDesk*" -type f -exec ls -la {} \;
+          # Check lock file
+          echo "Checking for lock files..."
+          ls -la ~/Library/Application\ Support/com.carriez.RustDesk/ 2>&1 || echo " Directory check failed"
           
           echo "✅ RustDesk started"
 
@@ -272,7 +226,6 @@ jobs:
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          echo "=== Setting up Tailscale ==="
           brew install tailscale
           BREW_PREFIX=$(brew --prefix)
           sudo mkdir -p /var/lib/tailscale /var/run/tailscale
@@ -302,15 +255,13 @@ jobs:
       - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date +%H:%M:%S)] Status: IP=${{ env.TAILSCALE_IP }} ARD=${{ env.VNC_PORT }} RustDesk=${{ env.RUSTDESK_ID }}"
+            echo "[$(date +%H:%M:%S)] IP=${{ env.TAILSCALE_IP }} ARD=${{ env.VNC_PORT }} RustDesk=${{ env.RUSTDESK_ID }}"
             
-            # Check ARD
             if ! lsof -iTCP:${{ env.VNC_PORT }} -sTCP:LISTEN | grep -q LISTEN; then
               echo "ARD not listening, restarting..."
               sudo launchctl kickstart -k system/com.apple.screensharing
             fi
             
-            # Check RustDesk
             if ! pgrep -f "RustDesk --server" > /dev/null; then
               echo "RustDesk server not running, restarting..."
               /Applications/RustDesk.app/Contents/MacOS/RustDesk --server &
