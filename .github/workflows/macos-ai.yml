@@ -1,4 +1,4 @@
-name: macOS Remote Desktop Fixed
+name: macOS Remote Desktop
 
 on:
   workflow_dispatch:
@@ -9,445 +9,218 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: System Info
+      - name: Setup User & System
         run: |
-          echo "=== macOS Version ==="
-          sw_vers
-          echo "=== Hardware UUID ==="
-          ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID
+          # Create admin user
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh RealName "Kaiden" UniqueID 1001 PrimaryGroupID 80 NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "kaiden123"
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo dscl . -append /Groups/wheel GroupMembership kaiden
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          sudo createhomedir -c -u kaiden
+          echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
+          
+          # Prevent sleep
+          sudo pmset -c displaysleep 0
+          caffeinate -d &
+          
+          echo "✅ User created"
 
-      - name: Create Admin User
+      - name: Fix TCC Permissions (Pre-Install)
         run: |
-          USERNAME="kaiden"
-          PASSWORD="kaiden123"
-          
-          sudo dscl . -create /Users/$USERNAME
-          sudo dscl . -create /Users/$USERNAME UserShell /bin/zsh
-          sudo dscl . -create /Users/$USERNAME RealName "Kaiden"
-          sudo dscl . -create /Users/$USERNAME UniqueID 1001
-          sudo dscl . -create /Users/$USERNAME PrimaryGroupID 80
-          sudo dscl . -create /Users/$USERNAME NFSHomeDirectory /Users/$USERNAME
-          
-          sudo dscl . -passwd /Users/$USERNAME "$PASSWORD"
-          
-          sudo dscl . -append /Groups/admin GroupMembership $USERNAME
-          sudo dscl . -append /Groups/wheel GroupMembership $USERNAME
-          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership $USERNAME
-          
-          sudo createhomedir -c -u $USERNAME
-          
-          echo "$USERNAME ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USERNAME
-          sudo chmod 440 /etc/sudoers.d/$USERNAME
-          
-          echo "✅ User '$USERNAME' created"
-
-      - name: Configure TCC Permissions (Pre-Install)
-        run: |
-          echo "=== Configuring TCC Database BEFORE RustDesk Launch ==="
-          
-          # Install tccutil if needed
-          sudo pip3 install tccutil || true
-          
-          # Reset any existing RustDesk entries first
-          sudo tccutil reset ScreenCapture com.carriez.RustDesk 2>/dev/null || true
-          sudo tccutil reset Accessibility com.carriez.RustDesk 2>/dev/null || true
-          sudo tccutil reset PostEvent com.carriez.RustDesk 2>/dev/null || true
-          
-          # Manually inject permissions into TCC database
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          
-          # RustDesk bundle ID
           BUNDLE_ID="com.carriez.RustDesk"
-          
-          # Required services for screen sharing
-          SERVICES=(
-            "kTCCServiceScreenCapture"
-            "kTCCServiceAccessibility"
-            "kTCCServicePostEvent"
-            "kTCCServiceListenEvent"
-            "kTCCServiceMediaLibrary"
-          )
-          
-          for service in "${SERVICES[@]}"; do
-            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='$BUNDLE_ID' AND service='$service';" 2>/dev/null || true
-            sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) VALUES ('$service','$BUNDLE_ID',0,2,4,1,'UNUSED',0,$(date +%s));" 2>/dev/null || true
-          done
-          
-          # Also add the binary path directly (important for headless operation)
           BIN_PATH="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
-          for service in "${SERVICES[@]}"; do
+          
+          # Reset and add permissions
+          sudo tccutil reset ScreenCapture $BUNDLE_ID 2>/dev/null || true
+          
+          for service in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServicePostEvent; do
+            sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='$BUNDLE_ID' AND service='$service';" 2>/dev/null || true
+            sudo sqlite3 "$TCC_DB" "INSERT INTO access VALUES('$service','$BUNDLE_ID',0,2,4,1,NULL,NULL,0,'UNUSED',0,0,$(date +%s));" 2>/dev/null || true
             sudo sqlite3 "$TCC_DB" "DELETE FROM access WHERE client='$BIN_PATH' AND service='$service';" 2>/dev/null || true
-            sudo sqlite3 "$TCC_DB" "INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) VALUES ('$service','$BIN_PATH',1,2,4,1,'UNUSED',0,$(date +%s));" 2>/dev/null || true
+            sudo sqlite3 "$TCC_DB" "INSERT INTO access VALUES('$service','$BIN_PATH',1,2,4,1,NULL,NULL,0,'UNUSED',0,0,$(date +%s));" 2>/dev/null || true
           done
           
-          # Verify permissions were added
-          echo "=== Current RustDesk TCC Permissions ==="
-          sudo sqlite3 "$TCC_DB" "SELECT service, client, auth_value FROM access WHERE client LIKE '%RustDesk%';" 2>/dev/null || echo "No permissions found"
-          
-          echo "✅ TCC permissions configured"
+          echo "✅ TCC permissions set"
 
-      - name: Install RustDesk via Brew
+      - name: Install RustDesk
         run: |
-          echo "Installing latest RustDesk..."
           brew install --cask rustdesk
           sudo xattr -cr /Applications/RustDesk.app
-          
-          # Disable quarantine
           sudo xattr -dr com.apple.quarantine /Applications/RustDesk.app 2>/dev/null || true
-          
           echo "✅ RustDesk installed"
 
-      - name: Generate Unique RustDesk ID
+      - name: Generate Unique ID
         run: |
-          echo "=== Generating Unique RustDesk ID ==="
-          
-          # Get machine UUID
-          MACHINE_UUID=$(ioreg -rd1 -c IOPlatformExpertDevice | grep -o '"IOPlatformUUID" = "[^"]*"' | cut -d'"' -f4)
-          echo "Machine UUID: $MACHINE_UUID"
-          
-          # Generate a unique ID based on GitHub Run ID + random suffix to avoid collisions
-          UNIQUE_ID="${GITHUB_RUN_ID}$(openssl rand -hex 2)"
-          echo "Desired Custom ID: $UNIQUE_ID"
-          
-          # Download and use custom-rustdesk tool to encrypt the ID
-          CUSTOM_TOOL_URL="https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal"
-          curl -L -o /tmp/custom-rustdesk "$CUSTOM_TOOL_URL"
+          # Download ID generator tool
+          curl -L -o /tmp/custom-rustdesk https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal
           chmod +x /tmp/custom-rustdesk
           
-          # Generate encrypted ID using machine UUID
-          ENC_ID=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1 | grep "encrypted to" | cut -d'"' -f4)
+          # Get machine UUID and generate unique ID
+          MACHINE_UUID=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | cut -d'"' -f4)
+          UNIQUE_ID="${GITHUB_RUN_ID}$(openssl rand -hex 2)"
           
-          if [ -z "$ENC_ID" ]; then
-            echo "Warning: Failed to generate encrypted ID, using default"
-            ENC_ID=""
-          else
-            echo "Encrypted ID: $ENC_ID"
-          fi
+          # Encrypt ID
+          ENC_ID=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1 | grep "encrypted to" | cut -d'"' -f4)
           
           echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
           echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
-          echo "✅ Unique ID generated"
+          echo "Generated ID: $UNIQUE_ID"
 
-      - name: Configure RustDesk with Unique ID and Password
+      - name: Configure RustDesk
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
-          PASSWORD="kaiden123"
           
-          echo "=== Stopping any existing RustDesk processes ==="
-          sudo pkill -9 -f RustDesk || true
-          sleep 2
+          # Kill existing
+          sudo pkill -9 RustDesk 2>/dev/null || true
+          launchctl unload ~/Library/LaunchAgents/com.carriez.* 2>/dev/null || true
+          sudo launchctl unload /Library/LaunchDaemons/com.carriez.* 2>/dev/null || true
           
-          # Unload old plists
-          sudo launchctl bootout system/com.carriez.RustDesk_service 2>/dev/null || true
-          launchctl bootout gui/$(id -u)/com.carriez.RustDesk_server 2>/dev/null || true
-          sleep 1
+          # Clean configs
+          sudo rm -rf /var/root/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
+          rm -rf ~/Library/{Preferences,Application\ Support}/com.carriez.RustDesk
           
-          # Remove old configs completely
-          sudo rm -rf /var/root/Library/Preferences/com.carriez.RustDesk
-          sudo rm -rf /var/root/Library/Application\ Support/com.carriez.RustDesk
-          rm -rf "$HOME/Library/Preferences/com.carriez.RustDesk"
-          rm -rf "$HOME/Library/Application Support/com.carriez.RustDesk"
-          rm -f ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist
-          sudo rm -f /Library/LaunchDaemons/com.carriez.RustDesk_service.plist
-          
-          echo "=== Creating Config Directory Structure ==="
-          # Create directories for both root and user
+          # Create config with password and unique ID
+          mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
-          sudo mkdir -p /var/root/Library/Application\ Support/com.carriez.RustDesk
-          mkdir -p "$HOME/Library/Preferences/com.carriez.RustDesk"
-          mkdir -p "$HOME/Library/Application Support/com.carriez.RustDesk"
           
-          echo "=== Creating RustDesk Configuration with Unique ID ==="
-          # Create config with unique encrypted ID if available
-          if [ -n "$ENC_ID" ]; then
-            cat > /tmp/RustDesk2.toml << EOF
-enc_id = '$ENC_ID'
-password = '$PASSWORD'
-rendezvous_server = 'rs-ny.rustdesk.com'
-nat_type = 1
-serial = 0
-
-[options]
-direct-server = 'Y'
-direct-access-port = '21118'
-allow-lan-discovery = 'Y'
-verification-method = 'use-permanent-password'
-approve-mode = 'password'
-EOF
-          else
-            # Fallback without custom ID
-            cat > /tmp/RustDesk2.toml << EOF
-password = '$PASSWORD'
-rendezvous_server = 'rs-ny.rustdesk.com'
-nat_type = 1
-serial = 0
-
-[options]
-direct-server = 'Y'
-direct-access-port = '21118'
-allow-lan-discovery = 'Y'
-verification-method = 'use-permanent-password'
-approve-mode = 'password'
-EOF
-          fi
-          
-          # Copy config to both root and user locations
-          sudo cp /tmp/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
-          cp /tmp/RustDesk2.toml "$HOME/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml"
-          
-          sudo cp /tmp/RustDesk2.toml /var/root/Library/Application\ Support/com.carriez.RustDesk/RustDesk2.toml 2>/dev/null || true
-          cp /tmp/RustDesk2.toml "$HOME/Library/Application Support/com.carriez.RustDesk/RustDesk2.toml" 2>/dev/null || true
-          
-          # Set permissions
-          sudo chown -R root:wheel /var/root/Library/Preferences/com.carriez.RustDesk
-          sudo chmod -R 755 /var/root/Library/Preferences/com.carriez.RustDesk
-          
-          echo "✅ Configuration created"
-
-      - name: Start RustDesk Service and Set Password
-        run: |
-          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
-          PASSWORD="kaiden123"
-          
-          echo "=== Creating LaunchDaemon (Service) ==="
-          sudo tee /Library/LaunchDaemons/com.carriez.RustDesk_service.plist > /dev/null << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>Label</key>
-              <string>com.carriez.RustDesk_service</string>
-              <key>ProgramArguments</key>
-              <array>
-                  <string>/Applications/RustDesk.app/Contents/MacOS/RustDesk</string>
-                  <string>--service</string>
-              </array>
-              <key>KeepAlive</key>
-              <true/>
-              <key>RunAtLoad</key>
-              <true/>
-              <key>StandardOutPath</key>
-              <string>/tmp/rustdesk_service.log</string>
-              <key>StandardErrorPath</key>
-              <string>/tmp/rustdesk_service.error.log</string>
-              <key>UserName</key>
-              <string>root</string>
-          </dict>
-          </plist>
+          cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
+          enc_id = '${{ env.ENC_ID }}'
+          password = 'kaiden123'
+          verification-method = 'use-permanent-password'
+          approve-mode = 'password'
+          direct-server = 'Y'
+          direct-access-port = '21118'
           EOF
           
-          sudo chmod 644 /Library/LaunchDaemons/com.carriez.RustDesk_service.plist
+          sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           
-          echo "=== Creating LaunchAgent (GUI Server) for LoginWindow ==="
-          # Use LoginWindow session type to support headless operation
-          sudo mkdir -p /Library/LaunchAgents
-          sudo tee /Library/LaunchAgents/com.carriez.RustDesk_server.plist > /dev/null << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>Label</key>
-              <string>com.carriez.RustDesk_server</string>
-              <key>ProgramArguments</key>
-              <array>
-                  <string>/Applications/RustDesk.app/Contents/MacOS/RustDesk</string>
-                  <string>--server</string>
-              </array>
-              <key>KeepAlive</key>
-              <true/>
-              <key>RunAtLoad</key>
-              <true/>
-              <key>LimitLoadToSessionType</key>
-              <array>
-                  <string>LoginWindow</string>
-                  <string>Aqua</string>
-              </array>
-              <key>StandardOutPath</key>
-              <string>/tmp/rustdesk_server.log</string>
-              <key>StandardErrorPath</key>
-              <string>/tmp/rustdesk_server.error.log</string>
-          </dict>
-          </plist>
-          EOF
-          
-          sudo chmod 644 /Library/LaunchAgents/com.carriez.RustDesk_server.plist
-          
-          echo "=== Starting Service (system domain) ==="
-          sudo launchctl bootstrap system /Library/LaunchDaemons/com.carriez.RustDesk_service.plist
-          sudo launchctl enable system/com.carriez.RustDesk_service
-          sudo launchctl kickstart -k system/com.carriez.RustDesk_service
-          sleep 5
-          
-          echo "=== Starting Server (LoginWindow domain for GUI access) ==="
-          sudo launchctl bootstrap loginwindow /Library/LaunchAgents/com.carriez.RustDesk_server.plist 2>/dev/null || true
-          sudo launchctl enable loginwindow/com.carriez.RustDesk_server 2>/dev/null || true
-          sudo launchctl kickstart -k loginwindow/com.carriez.RustDesk_server 2>/dev/null || true
-          sleep 3
-          
-          # Also try loading into current GUI session if available
-          launchctl bootstrap gui/$(id -u) /Library/LaunchAgents/com.carriez.RustDesk_server.plist 2>/dev/null || true
-          launchctl enable gui/$(id -u)/com.carriez.RustDesk_server 2>/dev/null || true
-          launchctl kickstart -k gui/$(id -u)/com.carriez.RustDesk_server 2>/dev/null || true
-          sleep 5
-          
-          echo "=== Setting Password via CLI ==="
-          # Start a temporary server process to accept password command
+          # Set password via CLI (must have server running)
           "$RUSTDESK_BIN" --server &
           SERVER_PID=$!
-          sleep 5
-          
-          # Set password
-          "$RUSTDESK_BIN" --password "$PASSWORD"
-          sleep 2
-          
-          # Keep temporary server running a bit longer to ensure password is written
-          sleep 5
+          sleep 3
+          "$RUSTDESK_BIN" --password kaiden123
+          sleep 3
           kill $SERVER_PID 2>/dev/null || true
           sleep 2
           
-          # Also try opening GUI to finalize registration (creates necessary keychain entries)
-          echo "=== Launching GUI to finalize setup ==="
+          # Open GUI once to finalize
           open -n /Applications/RustDesk.app &
-          GUI_PID=$!
-          sleep 10
+          sleep 8
+          pkill -9 RustDesk
           
-          # Kill GUI but keep services running
-          kill $GUI_PID 2>/dev/null || true
-          sudo pkill -9 RustDesk 2>/dev/null || true
-          sleep 2
+          echo "✅ Configured"
+
+      - name: Start RustDesk Services
+        run: |
+          # Service (root) - handles network
+          sudo tee /Library/LaunchDaemons/com.carriez.RustDesk_service.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>com.carriez.RustDesk_service</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/Applications/RustDesk.app/Contents/MacOS/RustDesk</string>
+              <string>--service</string>
+            </array>
+            <key>KeepAlive</key>
+            <true/>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>UserName</key>
+            <string>root</string>
+          </dict>
+          </plist>
+          EOF
           
-          # Restart services to ensure clean state
-          echo "=== Restarting Services ==="
-          sudo launchctl kickstart -k system/com.carriez.RustDesk_service 2>/dev/null || true
-          sleep 3
-          sudo launchctl kickstart -k loginwindow/com.carriez.RustDesk_server 2>/dev/null || true
-          launchctl kickstart -k gui/$(id -u)/com.carriez.RustDesk_server 2>/dev/null || true
+          # Server (user GUI) - handles screen capture
+          mkdir -p ~/Library/LaunchAgents
+          tee ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>com.carriez.RustDesk_server</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/Applications/RustDesk.app/Contents/MacOS/RustDesk</string>
+              <string>--server</string>
+            </array>
+            <key>KeepAlive</key>
+            <true/>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>LimitLoadToSessionType</key>
+            <array>
+              <string>Aqua</string>
+              <string>LoginWindow</string>
+            </array>
+          </dict>
+          </plist>
+          EOF
+          
+          # Load services
+          sudo launchctl load /Library/LaunchDaemons/com.carriez.RustDesk_service.plist
+          launchctl load ~/Library/LaunchAgents/com.carriez.RustDesk_server.plist
+          
           sleep 5
           
-          echo "=== Getting Final RustDesk ID ==="
-          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>&1)
-          echo "RustDesk ID: $RUSTDESK_ID"
+          # Get final ID
+          RUSTDESK_ID=$(/Applications/RustDesk.app/Contents/MacOS/RustDesk --get-id 2>&1)
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
-          
-          echo "✅ RustDesk configured"
+          echo "ID: $RUSTDESK_ID"
 
-      - name: Install and Configure Virtual Display (Fix Black Screen)
+      - name: Setup ARD (Backup)
         run: |
-          echo "=== Preventing Display Sleep and Creating Virtual Display ==="
-          
-          # Install RDM (Retina Display Manager) or use built-in tools to create virtual display
-          brew install displaylink 2>/dev/null || true
-          
-          # Prevent sleep using caffeinate (built-in macOS utility)
-          # This creates a virtual "user activity" to keep display awake
-          caffeinate -d -t 36000 &
-          CAFFEINATE_PID=$!
-          echo "CAFFEINATE_PID=$CAFFEINATE_PID" >> $GITHUB_ENV
-          
-          # Set display to never sleep (system preferences)
-          sudo pmset -c displaysleep 0 2>/dev/null || true
-          sudo pmset -b displaysleep 0 2>/dev/null || true
-          
-          # Also use nosleep if available, otherwise built-in caffeinate is sufficient
-          # Create a dummy display resolution to ensure framebuffer exists
-          sudo defaults write /Library/Preferences/com.apple.windowserver.plist DisplayResolutionEnabled -bool true 2>/dev/null || true
-          
-          echo "✅ Display sleep prevention configured"
-
-      - name: Setup Apple Remote Desktop (Backup Plan)
-        run: |
-          echo "=== Configuring Apple Remote Desktop (Backup) ==="
-          
-          # Generate VNC password hash
-          echo "kaiden123" | sudo perl -we '
-            $pw = <STDIN>; chomp $pw;
-            @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA";
-            @p = unpack "C*", $pw;
-            foreach (0..length($pw)-1) { $p[$_] ^= $k[$_]; }
-            print pack "C*", @p;
-          ' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
-          
+          echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw kaiden123 \
-            -allowAccessFor -allUsers -restart -agent -menu 2>/dev/null || true
-          
-          echo "✅ ARD configured"
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -privs -all -clientopts -setvnclegacy -vnclegacy yes -clientopts -setvncpw -vncpw kaiden123 -allowAccessFor -allUsers -restart -agent -menu 2>/dev/null || true
+          echo "✅ ARD ready"
 
-      - name: Install Tailscale
+      - name: Setup Tailscale
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           brew install tailscale
-          BREW_PREFIX=$(brew --prefix)
-          sudo mkdir -p /var/lib/tailscale /var/run/tailscale
-          
-          sudo "$BREW_PREFIX/opt/tailscale/bin/tailscaled" \
-            --state=/var/lib/tailscale/tailscaled.state \
-            --socket=/var/run/tailscale/tailscaled.sock &
-          
+          sudo $(brew --prefix)/opt/tailscale/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
           sleep 5
-          
-          sudo "$BREW_PREFIX/bin/tailscale" \
-            --socket=/var/run/tailscale/tailscaled.sock \
-            up --authkey=$TAILSCALE_AUTH_KEY \
-            --hostname=macos-rdp-${{ github.run_id }}
-          
-          TS_IP=$(sudo "$BREW_PREFIX/bin/tailscale" --socket=/var/run/tailscale/tailscaled.sock ip -4)
+          sudo $(brew --prefix)/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=macos-rdp-${{ github.run_id }}
+          TS_IP=$(sudo $(brew --prefix)/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale IP: $TS_IP"
-
-      - name: Final Diagnostics
-        if: always()
-        run: |
-          echo "=== FINAL RUSTDESK DIAGNOSTICS ==="
-          
-          echo "--- Process Status ---"
-          ps aux | grep -i rustdesk | grep -v grep || echo "No RustDesk processes"
-          
-          echo "--- Service Status ---"
-          sudo launchctl print system/com.carriez.RustDesk_service 2>&1 | head -20 || echo "Service not loaded"
-          
-          echo "--- Server Status (LoginWindow) ---"
-          sudo launchctl print loginwindow/com.carriez.RustDesk_server 2>&1 | head -20 || echo "Server not loaded in LoginWindow"
-          
-          echo "--- Config Files ---"
-          echo "User config contents:"
-          cat "$HOME/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml" 2>/dev/null || echo "Not found"
-          echo ""
-          echo "Root config contents:"
-          sudo cat /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml 2>/dev/null || echo "Not found"
-          
-          echo "--- Network Status ---"
-          lsof -iTCP -sTCP:LISTEN | grep rustdesk || echo "No TCP listeners"
-          netstat -an | grep "21118" || echo "Port 21118 not found"
-          
-          echo "--- RustDesk ID ---"
-          /Applications/RustDesk.app/Contents/MacOS/RustDesk --get-id 2>&1 || echo "Failed to get ID"
-          
-          echo "--- Recent Logs ---"
-          tail -30 /tmp/rustdesk_service.log 2>/dev/null || echo "No service log"
-          tail -30 /tmp/rustdesk_server.error.log 2>/dev/null || echo "No server error log"
+          echo "IP: $TS_IP"
 
       - name: Connection Info
         run: |
-          cat << EOF
+          echo ""
+          echo "╔═════════════════════════════════════════════════════════╗"
+          echo "║           CONNECTION INFO                               ║"
+          echo "╚═════════════════════════════════════════════════════════╝"
+          echo "  Tailscale IP: ${{ env.TAILSCALE_IP }}"
+          echo "  Username: kaiden | Password: kaiden123"
+          echo ""
+          echo "  [ARD] ${{ env.TAILSCALE_IP }}:3283 (Most Reliable)"
+          echo "  [RustDesk] ID: ${{ env.RUSTDESK_ID }} | Pass: kaiden123"
+          echo "  [RustDesk Direct] ${{ env.TAILSCALE_IP }}:21118"
+          echo "  [SSH] ssh kaiden@${{ env.TAILSCALE_IP }}"
+          echo ""
+          echo "⚠️  If RustDesk shows 'Waiting for image', wait 30-60s or use ARD"
+
+      - name: Keep Alive
+        run: |
+          while true; do
+            echo "[$(date +%H:%M:%S)] Services: $(sudo launchctl list | grep com.carriez.RustDesk_service >/dev/null && echo "✅ Service" || echo "❌ Service") | $(launchctl list | grep com.carriez.RustDesk_server >/dev/null && echo "✅ Server" || echo "❌ Server") | IP: ${{ env.TAILSCALE_IP }}"
+            
+            # Restart if needed
+            sudo launchctl start com.carriez.RustDesk_service 2>/dev/null || true
+            launchctl start com.carriez.RustDesk_server 2>/dev/null || true
+            
+            caffeinate -d -t 300 &
+            sleep 300
+          done
           
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║              macOS REMOTE DESKTOP - CONNECTION INFO              ║
-          ╚══════════════════════════════════════════════════════════════════╝
-
-            Tailscale IP: $TAILSCALE_IP
-            Username:     kaiden
-            Password:     kaiden123
-
-          ┌──────────────────────────────────────────────────────────────────┐
-          │  ✅ OPTION 1: APPLE REMOTE DESKTOP (RECOMMENDED)                 │
-          ├──────────────────────────────────────────────────────────────────┤
-          │  ARD Address: $TAILSCALE_IP:3283                                 │
-          │  Password: kaiden123                                             │
-          │  This i
