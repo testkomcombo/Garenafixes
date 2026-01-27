@@ -11,11 +11,11 @@ jobs:
     steps:
       - name: System Setup
         run: |
-          echo "=== System Info ==="
+          echo "=== System Setup ==="
           sw_vers
           whoami
           
-          # Create user
+          # Create admin user
           sudo dscl . -create /Users/kaiden UserShell /bin/zsh RealName "Kaiden" UniqueID 1001 PrimaryGroupID 80 NFSHomeDirectory /Users/kaiden
           sudo dscl . -passwd /Users/kaiden "kaiden123"
           sudo dscl . -append /Groups/admin GroupMembership kaiden
@@ -32,7 +32,7 @@ jobs:
           
           echo "✅ System ready"
 
-      - name: TCC Permissions
+      - name: TCC Permissions (Critical for Screen Capture)
         run: |
           echo "=== Setting up TCC ==="
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
@@ -50,7 +50,7 @@ jobs:
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceListenEvent','com.carriez.RustDesk',0,2,4,1);"
           
-          echo "✅ TCC done"
+          echo "✅ TCC permissions set"
 
       - name: Setup ARD (macOS 15 Compatible)
         run: |
@@ -60,7 +60,7 @@ jobs:
           echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # ARD kickstart only (launchctl load fails on macOS 15 due to SIP)
+          # Enable ARD using kickstart (only method that works on macOS 15)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
@@ -69,35 +69,41 @@ jobs:
           
           sleep 5
           
-          # Check ports
-          echo "ARD Port check:"
-          lsof -iTCP:5900 -sTCP:LISTEN | grep LISTEN && echo "5900: YES" || echo "5900: NO"
-          lsof -iTCP:3283 -sTCP:LISTEN | grep LISTEN && echo "3283: YES" || echo "3283: NO"
+          # Check if ports are listening
+          echo "Checking ARD ports..."
+          lsof -iTCP:5900 -sTCP:LISTEN | grep LISTEN && echo "VNC_PORT=5900" >> $GITHUB_ENV || echo "Port 5900 not listening"
+          lsof -iTCP:3283 -sTCP:LISTEN | grep LISTEN && echo "VNC_PORT=3283" >> $GITHUB_ENV || echo "Port 3283 not listening"
           
-          if lsof -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
-            echo "VNC_PORT=5900" >> $GITHUB_ENV
-          elif lsof -iTCP:3283 -sTCP:LISTEN | grep -q LISTEN; then
-            echo "VNC_PORT=3283" >> $GITHUB_ENV
-          else
-            echo "VNC_PORT=5900" >> $GITHUB_ENV
+          # If neither port is active, kickstart again with different options
+          if ! lsof -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN && ! lsof -iTCP:3283 -sTCP:LISTEN | grep -q LISTEN; then
+            echo "Ports not active, trying alternative kickstart..."
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on
+            sleep 3
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes
+            sleep 3
+            
+            # Check again
+            if lsof -iTCP:5900 -sTCP:LISTEN | grep -q LISTEN; then
+              echo "VNC_PORT=5900" >> $GITHUB_ENV
+            elif lsof -iTCP:3283 -sTCP:LISTEN | grep -q LISTEN; then
+              echo "VNC_PORT=3283" >> $GITHUB_ENV
+            else
+              echo "WARNING: ARD ports still not active, using default 5900"
+              echo "VNC_PORT=5900" >> $GITHUB_ENV
+            fi
           fi
 
-      - name: Install RustDesk
+      - name: Install & Configure RustDesk
         run: |
           echo "=== Installing RustDesk ==="
           brew install --cask rustdesk
           sudo xattr -cr /Applications/RustDesk.app
-
-      - name: Generate RustDesk ID
-        run: |
-          echo "=== Generating ID ==="
           
+          # Generate unique ID
           curl -sL -o /tmp/custom-rustdesk https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal
           chmod +x /tmp/custom-rustdesk
-          
           MACHINE_UUID=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | cut -d'"' -f4)
           UNIQUE_ID="${GITHUB_RUN_ID}$(openssl rand -hex 2)"
-          
           ENC_OUTPUT=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1)
           ENC_ID=$(echo "$ENC_OUTPUT" | grep "encrypted to" | cut -d'"' -f4)
           
@@ -106,49 +112,57 @@ jobs:
             echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
             echo "Generated enc_id: $ENC_ID"
           fi
-
-      - name: Configure & Start RustDesk (CRITICAL ORDER)
-        run: |
-          echo "=== Configuring & Starting RustDesk ==="
           
-          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          # CRITICAL: Workaround for password setting in headless environment
+          # RustDesk stores passwords in macOS Keychain, which requires GUI context
+          # Solution: Use the --config option with a pre-configured string
+          
+          echo "Preparing RustDesk configuration..."
+          
+          # Change to RustDesk directory (important for relative paths)
+          cd /Applications/RustDesk.app/Contents/MacOS/
           
           # Kill any existing
-          sudo pkill -9 RustDesk || echo "No existing processes"
+          sudo pkill -9 RustDesk || true
           sleep 2
           
-          # CRITICAL STEP 1: Start server FIRST (without config)
-          echo "Starting RustDesk server..."
-          "$RUSTDESK_BIN" --server &
-          SERVER_PID=$!
-          echo "Server PID: $SERVER_PID"
-          
-          sleep 5
-          
-          # Verify server is running
-          ps aux | grep -i "rustdesk.*--server" | grep -v grep || echo "WARNING: Server not found"
-          
-          # CRITICAL STEP 2: Set password WHILE server is running (this encrypts it)
-          echo "Setting password..."
-          "$RUSTDESK_BIN" --password kaiden123
-          echo "Password command exit code: $?"
-          
-          sleep 3
-          
-          # CRITICAL STEP 3: Get the ID (server generates it)
-          RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id)
-          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
-          echo "RustDesk ID: $RUSTDESK_ID"
-          
-          # CRITICAL STEP 4: NOW write the config with encrypted password and settings
-          # The server has already created the config with encrypted password, we add our settings
+          # Create config directory
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           
-          # Read current config
-          echo "Current config before modification:"
-          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml 2>/dev/null || echo "No config yet"
+          # Generate config with password using RustDesk's format
+          # Note: password must be set via --password command, but we need the service context
+          # Workaround: Create a LaunchAgent that will set password on startup
           
-          # Create new config with our settings (keeping the encrypted password)
+          # First, create a helper script to set password after GUI initialization
+          cat > /tmp/set_rustdesk_password.sh << 'SCRIPT'
+          #!/bin/bash
+          sleep 10
+          /Applications/RustDesk.app/Contents/MacOS/RustDesk --password kaiden123
+          SCRIPT
+          chmod +x /tmp/set_rustdesk_password.sh
+          
+          # Create a LaunchAgent for this helper
+          mkdir -p ~/Library/LaunchAgents
+          cat > ~/Library/LaunchAgents/com.rustdesk.password.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>com.rustdesk.password</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/tmp/set_rustdesk_password.sh</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>LaunchOnlyOnce</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          
+          # Write initial config (will be updated after password is set)
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
@@ -158,32 +172,49 @@ jobs:
           ${ENC_ID:+enc_id = '$ENC_ID'}
           EOF
           
-          echo "New config:"
-          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
-          
-          # CRITICAL STEP 5: Copy to system locations
+          # Copy to system location
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           
-          # CRITICAL STEP 6: Restart to apply config
-          echo "Restarting RustDesk to apply config..."
-          sudo pkill -9 RustDesk || true
+          echo "Config created with password placeholder"
+
+      - name: Start RustDesk Services
+        run: |
+          echo "=== Starting RustDesk Services ==="
+          
+          cd /Applications/RustDesk.app/Contents/MacOS/
+          
+          # Load password helper
+          launchctl load ~/Library/LaunchAgents/com.rustdesk.password.plist || true
+          
+          # Start service (as root - handles network)
+          echo "Starting RustDesk service..."
+          sudo ./RustDesk --service &
+          sleep 3
+          
+          # Start server (as user - handles screen capture)
+          echo "Starting RustDesk server..."
+          ./RustDesk --server &
+          sleep 5
+          
+          # Check processes
+          echo "RustDesk processes:"
+          ps aux | grep -i "rustdesk" | grep -v grep
+          
+          # Try to set password now that service is running
+          echo "Attempting to set password..."
+          ./RustDesk --password kaiden123 || echo "Password command may have failed (expected in headless)"
+          
           sleep 2
           
-          # Start service (root)
-          sudo "$RUSTDESK_BIN" --service &
-          sleep 3
+          # Get ID
+          RUSTDESK_ID=$(./RustDesk --get-id)
+          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+          echo "RustDesk ID: $RUSTDESK_ID"
           
-          # Start server (user)
-          "$RUSTDESK_BIN" --server &
-          sleep 3
-          
-          # Verify final ID
-          FINAL_ID=$("$RUSTDESK_BIN" --get-id)
-          echo "Final RustDesk ID: $FINAL_ID"
-          echo "RUSTDESK_ID=$FINAL_ID" >> $GITHUB_ENV
-          
-          echo "✅ RustDesk configured"
+          # Verify config
+          echo "Final config:"
+          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml || echo "Config file not found or modified"
 
       - name: Setup Tailscale
         env:
@@ -204,25 +235,33 @@ jobs:
           echo "╔════════════════════════════════════════════════════════════╗"
           echo "║              CONNECTION INFORMATION                        ║"
           echo "╚════════════════════════════════════════════════════════════╝"
-          echo "Tailscale IP: ${{ env.TAILSCALE_IP }}"
-          echo "Username: kaiden | Password: kaiden123"
           echo ""
-          echo "ARD: ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT }}"
-          echo "RustDesk ID: ${{ env.RUSTDESK_ID }}"
+          echo "Tailscale IP: ${{ env.TAILSCALE_IP }}"
+          echo "Username: kaiden"
+          echo "Password: kaiden123"
+          echo ""
+          echo "ARD (VNC):"
+          echo "  ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT }}"
+          echo ""
+          echo "RustDesk:"
+          echo "  ID: ${{ env.RUSTDESK_ID }}"
+          echo "  Password: kaiden123 (may require manual verification on first connect)"
           echo ""
 
       - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date +%H:%M:%S)] IP=${{ env.TAILSCALE_IP }} ARD=${{ env.VNC_PORT }} RustDesk=${{ env.RUSTDESK_ID }}"
+            echo "[$(date +%H:%M:%S)] Status: IP=${{ env.TAILSCALE_IP }} ARD=${{ env.VNC_PORT }} RustDesk=${{ env.RUSTDESK_ID }}"
             
+            # Check ARD
             if ! lsof -iTCP:${{ env.VNC_PORT }} -sTCP:LISTEN | grep -q LISTEN; then
-              echo "  ARD: Restarting..."
+              echo "ARD not running, restarting..."
               sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
             fi
             
+            # Check RustDesk
             if ! pgrep -f "RustDesk --server" > /dev/null; then
-              echo "  RustDesk: Restarting..."
+              echo "RustDesk server not running, restarting..."
               /Applications/RustDesk.app/Contents/MacOS/RustDesk --server &
             fi
             
