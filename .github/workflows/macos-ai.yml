@@ -31,7 +31,7 @@ jobs:
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           
-          # ARD comprehensive permissions
+          # ARD
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.apple.screensharing',0,2,4,1);"
@@ -39,9 +39,8 @@ jobs:
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/System/Library/CoreServices/RemoteManagement/AppleVNCServer.bundle',1,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServicePostEvent','com.apple.screensharing.agent',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.screensharing.agent',0,2,4,1);"
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.apple.RemoteDesktop.agent',0,2,4,1);"
           
-          # RustDesk permissions
+          # RustDesk
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','com.carriez.RustDesk',0,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceScreenCapture','/Applications/RustDesk.app/Contents/MacOS/RustDesk',1,2,4,1);"
           sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('kTCCServiceAccessibility','com.carriez.RustDesk',0,2,4,1);"
@@ -52,19 +51,15 @@ jobs:
 
       - name: Setup ARD
         run: |
-          # VNC password
           echo "kaiden123" | sudo perl -we '$p=<STDIN>;chomp$p;@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA";@p=unpack"C*",$p;for(0..length($p)-1){$p[$_]^=$k[$_]};print pack"C*",@p' | sudo dd of=/Library/Preferences/com.apple.VNCSettings.txt
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Enable ARD with full options
+          # ARD kickstart
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw kaiden123 \
             -allowAccessFor -allUsers -restart -agent -menu
-          
-          # Also ensure screensharing is enabled
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setmenuextra -menuextra yes
           
           sleep 3
           
@@ -76,21 +71,15 @@ jobs:
             echo "VNC_PORT=5900" >> $GITHUB_ENV
           fi
 
-      - name: Set Resolution (1280x720 16:9)
+      - name: Set Resolution (1344x756)
         run: |
           brew install displayplacer
           
-          echo "Available resolutions:"
-          displayplacer list | grep "mode "
-          
-          # Get screen ID and set to 1280x720 (closest 16:9 to 1366x768)
+          echo "Setting 1344x756..."
           SCREEN_ID=$(displayplacer list | grep "Persistent screen id" | head -1 | awk '{print $4}')
-          echo "Setting screen $SCREEN_ID to 1280x720..."
+          displayplacer "id:${SCREEN_ID} res:1344x756 hz:60 color_depth:7 scaling:off origin:(0,0) degree:0"
           
-          # Try to set 1280x720 (mode 4 from your list)
-          displayplacer "id:${SCREEN_ID} res:1280x720 hz:60 color_depth:7 scaling:off origin:(0,0) degree:0" || echo "Could not set resolution"
-          
-          # Verify
+          echo "Current resolution:"
           displayplacer list | grep "Resolution"
 
       - name: Install RustDesk
@@ -112,43 +101,81 @@ jobs:
           echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
           if [ -n "$ENC_ID" ]; then
             echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
+            echo "ENC_ID: $ENC_ID"
           fi
 
-      - name: Configure RustDesk
+      - name: Configure RustDesk (Fixed)
         run: |
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
+          # Kill any existing
           sudo pkill -9 RustDesk || true
           sleep 2
           
+          # Clean all configs
           sudo rm -rf /var/root/Library/Preferences/com.carriez.RustDesk
+          sudo rm -rf /var/root/Library/Application\ Support/com.carriez.RustDesk
           rm -rf ~/Library/Preferences/com.carriez.RustDesk
+          rm -rf ~/Library/Application\ Support/com.carriez.RustDesk
           
+          # Create directories
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
+          mkdir -p ~/Library/Application\ Support/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
+          sudo mkdir -p /var/root/Library/Application\ Support/com.carriez.RustDesk
           
+          # CRITICAL: Write config to ALL locations BEFORE starting
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
+          enc_id = '${ENC_ID}'
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
           approve-mode = 'password'
           direct-server = 'Y'
           direct-access-port = '21118'
-          ${ENC_ID:+enc_id = '$ENC_ID'}
+          
+          [options]
+          enable-hotkey = 'N'
+          allow-linux-headless = 'Y'
           EOF
           
+          # Copy to all locations
+          cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml ~/Library/Application\ Support/com.carriez.RustDesk/
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
+          sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Application\ Support/com.carriez.RustDesk/
           
+          # Set permissions (important!)
+          sudo chown -R root:wheel /var/root/Library/Preferences/com.carriez.RustDesk
+          sudo chown -R root:wheel /var/root/Library/Application\ Support/com.carriez.RustDesk
+          chmod 644 ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
+          chmod 644 ~/Library/Application\ Support/com.carriez.RustDesk/RustDesk2.toml
+          sudo chmod 644 /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
+          sudo chmod 644 /var/root/Library/Application\ Support/com.carriez.RustDesk/RustDesk2.toml
+          
+          echo "Config written:"
+          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
+          
+          echo "Starting RustDesk..."
+          
+          # Start service
           sudo "$RUSTDESK_BIN" --service &
-          sleep 3
+          sleep 5
           
+          # Start server
           "$RUSTDESK_BIN" --server &
           sleep 5
           
+          # Set password (now that everything is running)
           sudo "$RUSTDESK_BIN" --password kaiden123
           sleep 3
           
+          # Get ID
           RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id)
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+          echo "ID: $RUSTDESK_ID"
+          
+          # Verify config wasn't overwritten
+          echo "Config after start:"
+          sudo cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml | grep "enc_id"
 
       - name: Setup Tailscale
         env:
@@ -172,25 +199,35 @@ jobs:
           echo ""
           echo "ARD VNC:       ${{ env.TAILSCALE_IP }}:${{ env.VNC_PORT }}"
           echo "RUSTDESK ID:   ${{ env.RUSTDESK_ID }}"
-          echo "RESOLUTION:    1280x720 (16:9)"
+          echo "RESOLUTION:    1344x756"
           echo ""
 
-      - name: Keep Alive
+      - name: Keep Alive (Fixed)
         run: |
           while true; do
             echo "[$(date +%H:%M:%S)] IP:${{ env.TAILSCALE_IP }} ARD:${{ env.VNC_PORT }} RUSTDESK:${{ env.RUSTDESK_ID }}"
             
-            if ! lsof -iTCP:${{ env.VNC_PORT }} -sTCP:LISTEN | grep -q LISTEN; then
-              echo "ARD restart..."
-              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
+            # Memory check
+            echo "Memory usage:"
+            ps aux | grep -E "RustDesk|ARD" | awk '{print $3"%",$4"%",$11}' | head -5
+            
+            # Check RustDesk - restart if not running
+            if ! pgrep -f "RustDesk --server" > /dev/null; then
+              echo "RustDesk server down, restarting..."
+              /Applications/RustDesk.app/Contents/MacOS/RustDesk --server &
             fi
             
-            if ! pgrep -f "RustDesk --server" > /dev/null; then
-              echo "RustDesk restart..."
-              /Applications/RustDesk.app/Contents/MacOS/RustDesk --server &
+            if ! pgrep -f "RustDesk --service" > /dev/null; then
+              echo "RustDesk service down, restarting..."
+              sudo /Applications/RustDesk.app/Contents/MacOS/RustDesk --service &
+            fi
+            
+            # Check ARD
+            if ! lsof -iTCP:${{ env.VNC_PORT }} -sTCP:LISTEN | grep -q LISTEN; then
+              echo "ARD down, restarting..."
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
             fi
             
             caffeinate -d -t 300 &
             sleep 300
           done
-          
