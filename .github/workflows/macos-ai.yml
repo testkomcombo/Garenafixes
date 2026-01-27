@@ -28,35 +28,47 @@ jobs:
           sudo pmset -c displaysleep 0 sleep 0 2>/dev/null || true
           sudo pmset -b displaysleep 0 sleep 0 2>/dev/null || true
 
-      - name: Install BetterDisplay & Create Virtual Display (FIXES BLACK SCREEN)
+      - name: Create Virtual Display (BetterDisplay)
         run: |
           echo "=== Installing BetterDisplay ==="
           brew install --cask betterdisplay
+          brew install waydabber/betterdisplay/betterdisplaycli 2>/dev/null || true
+          
+          echo "=== Launching BetterDisplay ==="
+          # Remove quarantine
+          sudo xattr -dr com.apple.quarantine /Applications/BetterDisplay.app 2>/dev/null || true
+          
+          # Launch the app in background (REQUIRED before CLI works)
+          nohup /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay > /tmp/betterdisplay.log 2>&1 &
+          sleep 5
+          
+          # Verify app is running
+          if ! pgrep -f "BetterDisplay" > /dev/null; then
+            echo "Warning: BetterDisplay not running, trying open command..."
+            open -a BetterDisplay
+            sleep 5
+          fi
           
           echo "=== Creating Virtual Display ==="
-          # BetterDisplay CLI is included in the app bundle
-          BETTER_DISPLAY="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
+          # Create virtual screen using betterdisplaycli or embedded CLI
+          if command -v betterdisplaycli &> /dev/null; then
+            betterdisplaycli create -devicetype=virtualscreen -virtualscreenname=VirtualDisplay -aspectWidth=16 -aspectHeight=9 -width=1920 -height=1080
+            sleep 2
+            betterdisplaycli set -namelike=VirtualDisplay -connected=on
+          else
+            /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay create -devicetype=virtualscreen -virtualscreenname=VirtualDisplay -aspectWidth=16 -aspectHeight=9 -width=1920 -height=1080
+            sleep 2
+            /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay set -namelike=VirtualDisplay -connected=on
+          fi
           
-          # Wait for app to be ready
-          sleep 2
+          echo "✅ Virtual display created"
           
-          # Create a virtual screen (16:9 aspect ratio, 1920x1080)
-          "$BETTER_DISPLAY" create -devicetype=virtualscreen -virtualscreenname=VirtualDisplay -aspectWidth=16 -aspectHeight=9 -width=1920 -height=1080
+          # Keep BetterDisplay running
+          while ! pgrep -f "BetterDisplay" > /dev/null; do
+            echo "Waiting for BetterDisplay..."
+            sleep 2
+          done
           
-          sleep 2
-          
-          # Connect/activate the virtual screen
-          "$BETTER_DISPLAY" set -namelike=VirtualDisplay -connected=on
-          
-          echo "✅ Virtual display created and connected"
-          
-          # Keep virtual display alive
-          caffeinate -d &
-          
-          # Verify display exists
-          sleep 2
-          system_profiler SPDisplaysDataType | grep -i "virtual\|resolution" || true
-
       - name: Configure TCC Permissions
         run: |
           echo "=== Setting up TCC permissions ==="
