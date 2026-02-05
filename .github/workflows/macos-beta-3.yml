@@ -32,17 +32,25 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # Change anka password (workaround: delete auth first so no old password needed)
+          # Change anka password — nuclear method for macOS 15
+          # Normal methods (dscl -passwd, sysadminctl) fail without secure token
           if id anka &>/dev/null; then
-            sudo dscl . -delete /Users/anka AuthenticationAuthority 2>/dev/null || true
-            sudo dscl . -passwd /Users/anka "kaiden123" || {
-              # Fallback: try creating password from scratch
-              sudo dscl . -create /Users/anka Password "" 2>/dev/null || true
-              sudo dscl . -passwd /Users/anka "" "kaiden123" 2>/dev/null || true
-            }
-            # Give anka admin rights too
-            sudo dscl . -append /Groups/admin GroupMembership anka 2>/dev/null || true
-            sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership anka 2>/dev/null || true
+            USER_PLIST="/var/db/dslocal/nodes/Default/users/anka.plist"
+            
+            # Step 1: Nuke ALL existing auth data directly from the backing file
+            sudo plutil -remove ShadowHashData "$USER_PLIST" || true
+            sudo plutil -remove AuthenticationAuthority "$USER_PLIST" || true
+            
+            # Step 2: Restart directory service so it sees the changes
+            sudo killall opendirectoryd || true
+            sleep 3
+            
+            # Step 3: Now set password (nothing to verify since auth data is gone)
+            sudo dscl . -passwd /Users/anka "kaiden123"
+            
+            # Give anka admin + screensharing access
+            sudo dscl . -append /Groups/admin GroupMembership anka || true
+            sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership anka || true
             echo "anka ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/anka
             echo "anka password set to kaiden123"
           else
