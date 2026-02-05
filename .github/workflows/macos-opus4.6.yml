@@ -6,7 +6,384 @@ on:
 jobs:
   setup-macos:
     runs-on: macos-latest
+    timeout-minutes: 360name: macOS Remote Desktop - Official
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-macos:
+    runs-on: macos-latest
     timeout-minutes: 360
+
+    steps:
+      # ========================================
+      # STEP 1: System Info & Debug
+      # ========================================
+      - name: Display System Information
+        run: |
+          echo "=== System Information ==="
+          sw_vers
+          echo ""
+          echo "=== Hardware Info ==="
+          system_profiler SPHardwareDataType
+          echo ""
+          echo "=== Current User ==="
+          whoami
+          id
+          echo ""
+          echo "=== Network Interfaces ==="
+          ifconfig | grep -E "^[a-z]|inet "
+
+      # ========================================
+      # STEP 2: Install GNU coreutils (for timeout)
+      # ========================================
+      - name: Install GNU coreutils
+        run: |
+          echo "=== Installing GNU coreutils for gtimeout ==="
+          brew install coreutils
+          echo "=== Verifying gtimeout ==="
+          which gtimeout
+          gtimeout --version
+
+      # ========================================
+      # STEP 3: Create User Account
+      # ========================================
+      - name: Create User Account
+        run: |
+          echo "=== Creating user 'kaiden' ==="
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden kaiden123
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo createhomedir -c -u kaiden
+          echo "=== Verifying user creation ==="
+          dscl . -read /Users/kaiden
+          echo "=== User 'kaiden' created successfully ==="
+
+      # ========================================
+      # STEP 4: TCP Keepalive Configuration
+      # ========================================
+      - name: Configure TCP Keepalive (Prevent Connection Drops)
+        run: |
+          echo "=== Configuring TCP Keepalive Settings ==="
+          sudo sysctl -w net.inet.tcp.keepidle=60000
+          sudo sysctl -w net.inet.tcp.keepintvl=10000
+          sudo sysctl -w net.inet.tcp.keepcnt=10
+          sudo sysctl -w net.inet.tcp.always_keepalive=1
+          echo "=== Verifying TCP settings ==="
+          sysctl net.inet.tcp.keepidle
+          sysctl net.inet.tcp.keepintvl
+          sysctl net.inet.tcp.keepcnt
+          sysctl net.inet.tcp.always_keepalive
+          echo "=== TCP Keepalive configured ==="
+
+      # ========================================
+      # STEP 5: TCC Permissions (Before launching apps)
+      # ========================================
+      - name: Configure TCC Permissions
+        run: |
+          echo "=== Configuring TCC Permissions ==="
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          RUSTDESK_BUNDLE="com.carriez.rustdesk"
+          BETTERDISPLAY_BUNDLE="pro.betterdisplay.BetterDisplay"
+
+          echo "=== Adding Screen Capture permissions ==="
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$BETTERDISPLAY_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+
+          echo "=== Adding Accessibility permissions ==="
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$BETTERDISPLAY_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+
+          echo "=== Adding PostEvent permissions ==="
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServicePostEvent', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+
+          ARD_AGENT="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent"
+          echo "=== Adding ARD Agent permissions ==="
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$ARD_AGENT', 1, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$ARD_AGENT', 1, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+
+          echo "=== Verifying TCC entries ==="
+          sudo sqlite3 "$TCC_DB" "SELECT service, client, auth_value FROM access WHERE client LIKE '%rustdesk%' OR client LIKE '%ARD%' OR client LIKE '%BetterDisplay%';"
+          echo "=== TCC Permissions configured ==="
+
+      # ========================================
+      # STEP 6: Install BetterDisplay for Virtual Display
+      # ========================================
+      - name: Install BetterDisplay (Virtual Display for Headless)
+        run: |
+          echo "=== Installing BetterDisplay ==="
+          brew install --cask betterdisplay
+          echo "=== BetterDisplay installed ==="
+          ls -la /Applications/ | grep -i better || echo "BetterDisplay not in /Applications"
+
+      - name: Create Virtual Display
+        run: |
+          echo "=== Starting BetterDisplay ==="
+          open "/Applications/BetterDisplay.app"
+          echo "Waiting for BetterDisplay to initialize..."
+          sleep 20
+
+          echo "=== Checking if BetterDisplay is running ==="
+          pgrep -fl BetterDisplay || echo "BetterDisplay not found in process list"
+
+          echo "=== Checking betterdisplaycli location ==="
+          which betterdisplaycli && betterdisplaycli --version || echo "CLI not found or no --version flag"
+          ls -la /opt/homebrew/bin/betterdisplaycli 2>/dev/null || true
+
+          echo "=== Attempting to get display identifiers ==="
+          gtimeout 10s betterdisplaycli get identifiers 2>&1 || echo "Get identifiers failed (BetterDisplay Pro may be required for CLI)"
+
+          echo "=== Creating Virtual Display ==="
+          gtimeout 30s betterdisplaycli create set --type=VirtualScreen --virtualScreenName=VirtualDisplay --aspectWidth=16 --aspectHeight=9 --sizeInch=27 2>&1 || echo "Create command failed"
+          sleep 5
+
+          echo "=== Connecting Virtual Display ==="
+          gtimeout 15s betterdisplaycli set --nameLike=VirtualDisplay --connected=on 2>&1 || echo "Connect command failed"
+          sleep 3
+
+          echo "=== Setting resolution ==="
+          gtimeout 15s betterdisplaycli set --nameLike=VirtualDisplay --resolution=1920x1080 --refreshRate=60 --hiDPI=on 2>&1 || echo "Resolution command failed"
+
+          echo "=== Listing displays ==="
+          gtimeout 10s betterdisplaycli get identifiers 2>&1 || echo "List command failed"
+
+          echo "=== System display info ==="
+          system_profiler SPDisplaysDataType
+
+          echo "=== Virtual Display setup complete ==="
+
+      # ========================================
+      # STEP 7: Configure Apple Remote Desktop (ARD)
+      # ========================================
+      - name: Configure ARD/VNC
+        run: |
+          echo "=== Configuring Apple Remote Desktop ==="
+          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
+          echo "=== Enabling Screen Sharing via launchctl ==="
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || echo "Screen sharing launchctl load attempted"
+
+          echo "=== Activating ARD ==="
+          sudo $KICKSTART -activate
+
+          echo "=== Configuring ARD access ==="
+          sudo $KICKSTART -configure -allowAccessFor -allUsers -privs -all
+
+          echo "=== Enabling VNC legacy viewers ==="
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+
+          echo "=== Setting VNC password ==="
+          # NOTE: VNC DES encoding only uses the first 8 characters
+          echo "kaiden12" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*$/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+
+          echo "=== Restarting ARD Agent ==="
+          sudo $KICKSTART -restart -agent -console
+
+          echo "=== Verifying ARD is running ==="
+          sleep 3
+          ps aux | grep -i ARDAgent | grep -v grep || echo "ARD Agent not in process list"
+          sudo lsof -i :5900 2>/dev/null || echo "Nothing listening on port 5900 yet"
+
+          echo "=== Screen Sharing service status ==="
+          sudo launchctl list | grep -i screen || echo "No screen sharing services found"
+          echo "=== ARD Configuration complete ==="
+
+      # ========================================
+      # STEP 8: Install and Configure RustDesk
+      # ========================================
+      - name: Install RustDesk
+        run: |
+          echo "=== Installing RustDesk ==="
+          brew install --cask rustdesk
+          echo "=== Verifying RustDesk installation ==="
+          ls -la /Applications/ | grep -i rust
+          echo "=== RustDesk installed ==="
+
+      - name: Configure RustDesk for High Quality + Stability
+        run: |
+          echo "=== Creating RustDesk config directory ==="
+          RUSTDESK_CONFIG_DIR="/Users/kaiden/Library/Application Support/RustDesk/config"
+          sudo mkdir -p "$RUSTDESK_CONFIG_DIR"
+          sudo chown -R kaiden:staff "/Users/kaiden/Library/Application Support/RustDesk"
+
+          echo "=== Writing optimized RustDesk configuration ==="
+          CONFIG_FILE="$RUSTDESK_CONFIG_DIR/RustDesk2.toml"
+
+          # FIX: Use 'sudo tee' instead of 'sudo -u kaiden bash' (avoids CWD permission error)
+          # FIX: Use double quotes for TOML string values (TOML spec)
+          sudo tee "$CONFIG_FILE" > /dev/null << 'EOF'
+          enable-hwcodec = "N"
+          use-texture-render = "N"
+          allow-always-software-render = "Y"
+          allow-auto-disconnect = "N"
+          auto-disconnect-timeout = "0"
+            image-quality = "custom"
+          custom-image-quality = "90"
+          custom-fps = "60"
+          codec-preference = "vp9"
+          enable-abr = "Y"
+          enable-udp-punch = "Y"
+          direct-server = "Y"
+          enable-lan-discovery = "Y"
+          allow-remove-wallpaper = "N"
+          allow-auto-accept = "Y"
+          EOF
+
+          sudo chown kaiden:staff "$CONFIG_FILE"
+
+          echo "=== Config file contents ==="
+          sudo cat "$CONFIG_FILE"
+          echo ""
+          echo "=== Verifying ownership ==="
+          ls -la "$RUSTDESK_CONFIG_DIR/"
+          echo "=== RustDesk configuration complete ==="
+
+      - name: Start RustDesk Service
+        run: |
+          echo "=== Starting RustDesk ==="
+          # FIX: -H sets HOME to kaiden's home dir, avoiding CWD issues
+          sudo -u kaiden -H open -a RustDesk
+          echo "Waiting for RustDesk to start..."
+          sleep 15
+
+          echo "=== Checking RustDesk process ==="
+          ps aux | grep -i rustdesk | grep -v grep || echo "RustDesk process not found"
+
+          echo "=== Getting RustDesk ID ==="
+          RUSTDESK_TOML="/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml"
+          if [ -f "$RUSTDESK_TOML" ]; then
+            sudo cat "$RUSTDESK_TOML"
+          else
+            echo "RustDesk.toml not yet created, checking other locations..."
+            sudo find /Users/kaiden/Library -name "RustDesk.toml" -type f 2>/dev/null || echo "Not found under kaiden"
+            sudo find /Library -name "RustDesk.toml" -type f 2>/dev/null || echo "Not found under /Library"
+          fi
+          echo "=== RustDesk started ==="
+
+      # ========================================
+      # STEP 9: Install and Configure Tailscale
+      # ========================================
+      - name: Install Tailscale
+        run: |
+          echo "=== Installing Tailscale ==="
+          brew install tailscale
+          echo "=== Verifying Tailscale installation ==="
+          which tailscale
+          tailscale version
+          echo "=== Tailscale installed ==="
+
+      - name: Start Tailscale
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          echo "=== Creating Tailscale state directories ==="
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+
+          echo "=== Starting Tailscale daemon ==="
+          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+          echo "Waiting for tailscaled..."
+          sleep 5
+
+          echo "=== Connecting to Tailscale network ==="
+          sudo tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname=github-macos-runner
+
+          echo "=== Tailscale status ==="
+          tailscale status
+          echo "=== Tailscale IP ==="
+          tailscale ip -4
+          echo "=== Tailscale connected ==="
+
+      # ========================================
+      # STEP 10: Display Connection Info
+      # ========================================
+      - name: Display Connection Information
+        run: |
+          echo ""
+          echo "============================================"
+          echo "    REMOTE DESKTOP CONNECTION INFO"
+          echo "============================================"
+          echo ""
+          echo "=== Tailscale IP ==="
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "IP: $TAILSCALE_IP"
+          echo ""
+          echo "=== VNC Connection ==="
+          echo "Address: vnc://$TAILSCALE_IP:5900"
+          echo "Password: kaiden12  (VNC DES uses first 8 chars only)"
+          echo ""
+          echo "=== RustDesk ==="
+          RUSTDESK_TOML="/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml"
+          if [ -f "$RUSTDESK_TOML" ]; then
+            sudo grep -i "id" "$RUSTDESK_TOML" || echo "ID not found in config"
+          else
+            echo "RustDesk config not found - check logs above"
+          fi
+          echo ""
+          echo "=== User Credentials ==="
+          echo "Username: kaiden"
+          echo "Password: kaiden123"
+          echo ""
+          echo "============================================"
+
+      # ========================================
+      # STEP 11: Keep Session Alive
+      # ========================================
+      - name: Keep Session Alive
+        run: |
+          echo "=== Starting keep-alive loop ==="
+          echo "Session will remain active for up to 6 hours"
+          echo ""
+          KEEPALIVE_LOG="/tmp/keepalive.log"
+          START_TIME=$(date +%s)
+          ITERATION=0
+          while true; do
+            ITERATION=$((ITERATION + 1))
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$(( (CURRENT_TIME - START_TIME) / 60 ))
+            echo "$(date): Keep-alive iteration $ITERATION (${ELAPSED} minutes elapsed)" | tee -a $KEEPALIVE_LOG
+
+            if [ $((ITERATION % 5)) -eq 0 ]; then
+              echo "=== Service Health Check ===" | tee -a $KEEPALIVE_LOG
+
+              if pgrep -f RustDesk > /dev/null 2>&1; then
+                echo "RustDesk: RUNNING" | tee -a $KEEPALIVE_LOG
+              else
+                echo "RustDesk: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
+                sudo -u kaiden -H open -a RustDesk
+              fi
+
+              if tailscale status > /dev/null 2>&1; then
+                echo "Tailscale: CONNECTED" | tee -a $KEEPALIVE_LOG
+                tailscale ip -4 | tee -a $KEEPALIVE_LOG
+              else
+                echo "Tailscale: DISCONNECTED" | tee -a $KEEPALIVE_LOG
+              fi
+
+              if pgrep -f ARDAgent > /dev/null 2>&1; then
+                echo "ARD Agent: RUNNING" | tee -a $KEEPALIVE_LOG
+              else
+                echo "ARD Agent: NOT RUNNING" | tee -a $KEEPALIVE_LOG
+              fi
+
+              if pgrep -f BetterDisplay > /dev/null 2>&1; then
+                echo "BetterDisplay: RUNNING" | tee -a $KEEPALIVE_LOG
+              else
+                echo "BetterDisplay: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
+                open "/Applications/BetterDisplay.app"
+              fi
+
+              echo "===========================" | tee -a $KEEPALIVE_LOG
+            fi
+
+            sleep 60
+          done
 
     steps:
       # ========================================
