@@ -7,6 +7,9 @@ jobs:
   setup-macos:
     runs-on: macos-latest
     timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: /Users/runner
 
     steps:
       # ========================================
@@ -77,7 +80,13 @@ jobs:
       - name: Create Virtual Display
         run: |
           echo "=== Starting BetterDisplay ==="
-          open -a "BetterDisplay"
+          if [ -d "/Applications/BetterDisplay.app" ]; then
+            open "/Applications/BetterDisplay.app"
+          else
+            echo "BetterDisplay.app not found in /Applications"
+            ls -la /Applications
+            exit 1
+          fi
           echo "Waiting for BetterDisplay to initialize..."
           sleep 10
           echo "=== Creating Virtual Display ==="
@@ -153,14 +162,14 @@ jobs:
           sudo mkdir -p "/Users/kaiden/Library/Application Support/RustDesk/config"
           sudo chown -R kaiden:staff "/Users/kaiden/Library/Application Support/RustDesk"
           echo "=== Writing optimized RustDesk configuration ==="
-          cat > /tmp/rustdesk_config.toml << 'RUSTDESK_CONFIG'
+          cat << 'RUSTDESK_CONFIG' | sudo tee "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
           enable-hwcodec = 'N'
           use-texture-render = 'N'
           allow-always-software-render = 'Y'
           allow-auto-disconnect = 'N'
           auto-disconnect-timeout = '0'
-          image-quality = 'balanced'
-          custom-image-quality = '80'
+          image-quality = 'custom'
+          custom-image-quality = '90'
           custom-fps = '60'
           codec-preference = 'vp9'
           enable-abr = 'Y'
@@ -170,7 +179,6 @@ jobs:
           allow-remove-wallpaper = 'N'
           allow-auto-accept = 'Y'
           RUSTDESK_CONFIG
-          sed 's/^          //' /tmp/rustdesk_config.toml | sudo tee "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml" > /dev/null
           echo "=== Config file contents ==="
           cat "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
           echo "=== Setting permissions ==="
@@ -267,37 +275,38 @@ jobs:
           KEEPALIVE_LOG="/tmp/keepalive.log"
           START_TIME=$(date +%s)
           ITERATION=0
-          while true; do
-            ITERATION=$((ITERATION + 1))
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$(( (CURRENT_TIME - START_TIME) / 60 ))
-            echo "$(date): Keep-alive iteration $ITERATION (${ELAPSED} minutes elapsed)" | tee -a $KEEPALIVE_LOG
-            if [ $((ITERATION % 5)) -eq 0 ]; then
-              echo "=== Service Health Check ===" | tee -a $KEEPALIVE_LOG
-              if pgrep -f RustDesk > /dev/null; then
-                echo "RustDesk: RUNNING" | tee -a $KEEPALIVE_LOG
-              else
-                echo "RustDesk: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
-                sudo -u kaiden open -a RustDesk
+            while true; do
+              ITERATION=$((ITERATION + 1))
+              CURRENT_TIME=$(date +%s)
+              ELAPSED=$(( (CURRENT_TIME - START_TIME) / 60 ))
+              echo "$(date): Keep-alive iteration $ITERATION (${ELAPSED} minutes elapsed)" | tee -a $KEEPALIVE_LOG
+              if [ $((ITERATION % 5)) -eq 0 ]; then
+                echo "=== Service Health Check ===" | tee -a $KEEPALIVE_LOG
+                if pgrep -f RustDesk; then
+                  echo "RustDesk: RUNNING" | tee -a $KEEPALIVE_LOG
+                else
+                  echo "RustDesk: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
+                  sudo -u kaiden open -a RustDesk
+                fi
+                if tailscale status; then
+                  echo "Tailscale: CONNECTED" | tee -a $KEEPALIVE_LOG
+                  tailscale ip -4 | tee -a $KEEPALIVE_LOG
+                else
+                  echo "Tailscale: DISCONNECTED" | tee -a $KEEPALIVE_LOG
+                fi
+                if pgrep -f ARDAgent; then
+                  echo "ARD Agent: RUNNING" | tee -a $KEEPALIVE_LOG
+                else
+                  echo "ARD Agent: NOT RUNNING" | tee -a $KEEPALIVE_LOG
+                fi
+                if pgrep -f BetterDisplay; then
+                  echo "BetterDisplay: RUNNING" | tee -a $KEEPALIVE_LOG
+                else
+                  echo "BetterDisplay: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
+                  open "/Applications/BetterDisplay.app"
+                fi
+                echo "===========================" | tee -a $KEEPALIVE_LOG
               fi
-              if tailscale status > /dev/null 2>&1; then
-                echo "Tailscale: CONNECTED" | tee -a $KEEPALIVE_LOG
-                tailscale ip -4 | tee -a $KEEPALIVE_LOG
-              else
-                echo "Tailscale: DISCONNECTED" | tee -a $KEEPALIVE_LOG
-              fi
-              if pgrep -f ARDAgent > /dev/null; then
-                echo "ARD Agent: RUNNING" | tee -a $KEEPALIVE_LOG
-              else
-                echo "ARD Agent: NOT RUNNING" | tee -a $KEEPALIVE_LOG
-              fi
-              if pgrep -f BetterDisplay > /dev/null; then
-                echo "BetterDisplay: RUNNING" | tee -a $KEEPALIVE_LOG
-              else
-                echo "BetterDisplay: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
-                open -a BetterDisplay
-              fi
-              echo "===========================" | tee -a $KEEPALIVE_LOG
-            fi
-            sleep 60
-          done
+              sleep 60
+            done
+
