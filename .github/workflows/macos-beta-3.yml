@@ -1,0 +1,333 @@
+name: macOS Testing Beta 3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: System Setup
+        run: |
+          sw_vers
+          
+          # Create kaiden user (each attribute MUST be a separate call)
+          sudo dscl . -create /Users/kaiden
+          sudo dscl . -create /Users/kaiden UserShell /bin/zsh
+          sudo dscl . -create /Users/kaiden RealName "Kaiden"
+          sudo dscl . -create /Users/kaiden UniqueID 1001
+          sudo dscl . -create /Users/kaiden PrimaryGroupID 80
+          sudo dscl . -create /Users/kaiden NFSHomeDirectory /Users/kaiden
+          sudo dscl . -passwd /Users/kaiden "kaiden123"
+          sudo dscl . -append /Groups/admin GroupMembership kaiden
+          sudo dscl . -append /Groups/wheel GroupMembership kaiden
+          
+          # Screen sharing access group
+          sudo dscl . -read /Groups/com.apple.access_screensharing 2>/dev/null || \
+            sudo dscl . -create /Groups/com.apple.access_screensharing
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership kaiden
+          
+          sudo createhomedir -c -u kaiden
+          echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
+          
+          # Change anka user password if it exists
+          if id anka &>/dev/null; then
+            sudo dscl . -passwd /Users/anka "kaiden123"
+            echo "Changed anka password to kaiden123"
+          fi
+          
+          # Verify user
+          echo "=== User Verification ==="
+          dscl . -read /Users/kaiden UniqueID
+          dscl . -read /Users/kaiden NFSHomeDirectory
+          dscl . -read /Users/kaiden PrimaryGroupID
+          
+          # ===== PREVENT SLEEP & LOCK SCREEN =====
+          sudo pmset -c displaysleep 0 sleep 0
+          sudo pmset -b displaysleep 0 sleep 0
+          sudo pmset -a disablesleep 1
+          caffeinate -d &
+          
+          # Auto-login kaiden (no login screen on boot)
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
+          
+          # Disable screen lock completely (fixes "enter password" on reconnect)
+          defaults write com.apple.screensaver idleTime -int 0
+          defaults write com.apple.screensaver askForPassword -int 0
+          defaults write com.apple.screensaver askForPasswordDelay -int 0
+          defaults -currentHost write com.apple.screensaver idleTime -int 0
+          defaults -currentHost write com.apple.screensaver askForPassword -int 0
+          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword -int 0
+          sudo defaults write /Library/Preferences/.GlobalPreferences com.apple.screensaver askForPassword -int 0
+          sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true
+          
+          # Kill screensaver if running
+          killall ScreenSaverEngine 2>/dev/null || true
+          
+          echo "Ready"
+
+      - name: TCC Permissions
+        run: |
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          
+          ENTRIES=(
+            "kTCCServiceScreenCapture|com.apple.screensharing.agent|0"
+            "kTCCServiceScreenCapture|com.apple.RemoteDesktop.agent|0"
+            "kTCCServicePostEvent|com.apple.screensharing.agent|0"
+            "kTCCServiceAccessibility|com.apple.screensharing.agent|0"
+            "kTCCServiceScreenCapture|com.carriez.RustDesk|0"
+            "kTCCServiceAccessibility|com.carriez.RustDesk|0"
+            "kTCCServicePostEvent|com.carriez.RustDesk|0"
+          )
+          
+          SUCCESS=0
+          FAILED=0
+          for entry in "${ENTRIES[@]}"; do
+            IFS='|' read -r service client client_type <<< "$entry"
+            if sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version) VALUES ('$service','$client',$client_type,2,4,1);" 2>/dev/null; then
+              ((SUCCESS++))
+            else
+              ((FAILED++))
+            fi
+          done
+          
+          echo "TCC: $SUCCESS succeeded, $FAILED failed"
+
+      - name: Setup ARD/VNC
+        run: |
+          echo "Setting up ARD & VNC..."
+          
+          # Share console session (prevents black screen)
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
+          # Don't lock screen when VNC client disconnects
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement RestoreMachineState -bool false
+          
+          # VNC password: kaiden123
+          printf 'kaiden123' | sudo perl -we 'BEGIN{@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA"};read(STDIN,$p,16);@p=unpack"C*",$p;for($i=0;$i<16;$i++){$p[$i]^=$k[$i]};print pack"C*",@p' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
+          sudo chown root:wheel /Library/Preferences/com.apple.VNCSettings.txt
+          
+          # Kickstart ARD
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -privs -all \
+            -configure -clientopts -setvnclegacy -vnclegacy yes \
+            -configure -allowAccessFor -allUsers \
+            -restart -agent -menu 2>&1 | grep -v "No such key" || true
+          
+          # Load Screen Sharing daemon (not LaunchAgent)
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          
+          sleep 5
+          
+          # Open something so desktop isn't empty
+          open -a Finder /Users 2>/dev/null || true
+          
+          # Verify
+          echo "=== Port Check ==="
+          netstat -an | grep LISTEN | grep -E "\.5900\s" && echo "VNC listening on 5900" || echo "WARNING: VNC not on 5900"
+          sudo lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null || true
+          
+          echo "VNC_PORT=5900" >> $GITHUB_ENV
+
+      - name: Install RustDesk
+        run: |
+          brew install --cask rustdesk
+          sudo xattr -cr /Applications/RustDesk.app
+
+      - name: Configure RustDesk
+        run: |
+          echo "=== Downloading custom-rustdesk ==="
+          curl -sL -o /tmp/custom-rustdesk https://github.com/Jxpro/custom-rustdesk/releases/latest/download/custom-rustdesk-macos-universal
+          chmod +x /tmp/custom-rustdesk
+          
+          MACHINE_UUID=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | cut -d'"' -f4)
+          echo "Machine UUID: $MACHINE_UUID"
+          
+          UNIQUE_ID="${GITHUB_RUN_ID}$(openssl rand -hex 2)"
+          echo "Unique ID: $UNIQUE_ID"
+          
+          echo "=== Running custom-rustdesk ==="
+          ENC_OUTPUT=$(/tmp/custom-rustdesk --id "$UNIQUE_ID" --uuid "$MACHINE_UUID" 2>&1) || true
+          echo "Output: $ENC_OUTPUT"
+          
+          ENC_ID=$(echo "$ENC_OUTPUT" | grep "encrypted to" | cut -d'"' -f4)
+          echo "Encrypted ID: ${ENC_ID:-NOT FOUND}"
+          
+          echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
+          if [ -n "$ENC_ID" ]; then
+            echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
+          fi
+          
+          RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+          
+          # Kill ALL existing RustDesk processes cleanly
+          echo "=== Stopping existing RustDesk ==="
+          sudo pkill -9 -f RustDesk || true
+          sleep 3
+          # Verify they're dead
+          pgrep -f RustDesk && echo "WARNING: RustDesk still running" || echo "All RustDesk processes stopped"
+          
+          # Clean config directories
+          sudo rm -rf /var/root/Library/Preferences/com.carriez.RustDesk
+          rm -rf ~/Library/Preferences/com.carriez.RustDesk
+          
+          mkdir -p ~/Library/Preferences/com.carriez.RustDesk
+          sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
+          
+          # Write config
+          echo "=== Writing RustDesk config ==="
+          cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
+          password = 'kaiden123'
+          verification-method = 'use-permanent-password'
+          approve-mode = 'password'
+          direct-server = 'Y'
+          direct-access-port = '21118'
+          ${ENC_ID:+enc_id = '$ENC_ID'}
+          EOF
+          
+          echo "--- Config contents ---"
+          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
+          echo "--- End config ---"
+          
+          sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
+          
+          # Start RustDesk service (as root)
+          echo "=== Starting RustDesk service ==="
+          sudo "$RUSTDESK_BIN" --service &
+          SERVICE_PID=$!
+          echo "Service PID: $SERVICE_PID"
+          sleep 5
+          
+          # Start RustDesk server (as user)
+          echo "=== Starting RustDesk server ==="
+          "$RUSTDESK_BIN" --server &
+          SERVER_PID=$!
+          echo "Server PID: $SERVER_PID"
+          sleep 8
+          
+          # Set password
+          echo "=== Setting RustDesk password ==="
+          sudo "$RUSTDESK_BIN" --password kaiden123 2>&1 || true
+          sleep 3
+          
+          # Get ID with retries
+          echo "=== Getting RustDesk ID ==="
+          RUSTDESK_ID=""
+          for i in 1 2 3 4 5; do
+            RUSTDESK_ID=$("$RUSTDESK_BIN" --get-id 2>/dev/null || true)
+            if [ -n "$RUSTDESK_ID" ]; then
+              echo "Got RustDesk ID: $RUSTDESK_ID (attempt $i)"
+              break
+            fi
+            echo "Waiting for RustDesk ID (attempt $i/5)..."
+            sleep 5
+          done
+          
+          if [ -z "$RUSTDESK_ID" ]; then
+            echo "ERROR: Could not get RustDesk ID after 5 attempts"
+          fi
+          
+          echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+          
+          # Show all RustDesk processes for debugging
+          echo "=== RustDesk processes ==="
+          ps aux | grep -i [R]ustDesk || echo "No RustDesk processes found"
+          
+          # Show what ports RustDesk is listening on
+          echo "=== RustDesk ports ==="
+          sudo lsof -i -P | grep -i [R]ustDesk || echo "No RustDesk ports"
+
+      - name: Setup Tailscale
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          brew install tailscale
+          BREW_PREFIX=$(brew --prefix)
+          sudo mkdir -p /var/lib/tailscale /var/run/tailscale
+          sudo "$BREW_PREFIX/opt/tailscale/bin/tailscaled" \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --socket=/var/run/tailscale/tailscaled.sock &
+          sleep 5
+          
+          TAILSCALE_BIN="$BREW_PREFIX/bin/tailscale"
+          TAILSCALE_SOCK="--socket=/var/run/tailscale/tailscaled.sock"
+          
+          sudo "$TAILSCALE_BIN" $TAILSCALE_SOCK up \
+            --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" \
+            --hostname="macos-rdp-${{ github.run_id }}"
+          
+          TS_IP=$(sudo "$TAILSCALE_BIN" $TAILSCALE_SOCK ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Connection Info
+        run: |
+          echo ""
+          echo "==========================================="
+          echo "         CONNECTION INFORMATION"
+          echo "==========================================="
+          echo ""
+          echo "Tailscale IP:    ${{ env.TAILSCALE_IP }}"
+          echo ""
+          echo "--- VNC (ARD) ---"
+          echo "Address:         vnc://${{ env.TAILSCALE_IP }}:5900"
+          echo "Username:        kaiden"
+          echo "Password:        kaiden123"
+          echo ""
+          echo "--- RustDesk ---"
+          echo "RustDesk ID:     ${{ env.RUSTDESK_ID }}"
+          echo "RustDesk Pass:   kaiden123"
+          echo ""
+          echo "==========================================="
+          echo ""
+
+      - name: Keep Alive
+        run: |
+          while true; do
+            TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+            echo "[$TIMESTAMP] Health check..."
+            
+            # Kill screensaver if it somehow started
+            killall ScreenSaverEngine 2>/dev/null || true
+            
+            # --- ARD Check (fixed: "ARDAgent" not "ARD Agent") ---
+            ARD_PROC=$(pgrep -f "ARDAgent" 2>/dev/null || true)
+            VNC_PORT=$(netstat -an 2>/dev/null | grep -c "\.5900.*LISTEN" || true)
+            
+            if [ -z "$ARD_PROC" ] && [ "$VNC_PORT" -eq 0 ]; then
+              echo "  ARD is dead, restarting..."
+              sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+                -restart -agent 2>/dev/null || true
+              sleep 5
+            else
+              echo "  ARD OK (proc: ${ARD_PROC:-none}, vnc_listeners: $VNC_PORT)"
+            fi
+            
+            # --- RustDesk Check ---
+            RUSTDESK_SERVICE=$(pgrep -f "RustDesk --service" 2>/dev/null || true)
+            RUSTDESK_SERVER=$(pgrep -f "RustDesk --server" 2>/dev/null || true)
+            
+            if [ -z "$RUSTDESK_SERVICE" ]; then
+              echo "  RustDesk service not found, starting..."
+              sudo /Applications/RustDesk.app/Contents/MacOS/RustDesk --service &
+              sleep 3
+            fi
+            
+            if [ -z "$RUSTDESK_SERVER" ]; then
+              echo "  RustDesk server not found, starting..."
+              /Applications/RustDesk.app/Contents/MacOS/RustDesk --server &
+              sleep 3
+            fi
+            
+            if [ -n "$RUSTDESK_SERVICE" ] && [ -n "$RUSTDESK_SERVER" ]; then
+              echo "  RustDesk OK (svc: $RUSTDESK_SERVICE, srv: $RUSTDESK_SERVER)"
+            fi
+            
+            # Keep display awake
+            caffeinate -u -t 1 2>/dev/null || true
+            
+            sleep 300
+          done
