@@ -55,18 +55,19 @@ jobs:
           # Auto-login kaiden (no login screen on boot)
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
           
-          # Disable screen lock completely (fixes "enter password" on reconnect)
-          defaults write com.apple.screensaver idleTime -int 0
-          defaults write com.apple.screensaver askForPassword -int 0
-          defaults write com.apple.screensaver askForPasswordDelay -int 0
-          defaults -currentHost write com.apple.screensaver idleTime -int 0
-          defaults -currentHost write com.apple.screensaver askForPassword -int 0
-          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
-          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword -int 0
-          sudo defaults write /Library/Preferences/.GlobalPreferences com.apple.screensaver askForPassword -int 0
-          sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true
+          # Disable screen lock & screensaver (prevent login screen on reconnect)
+          # NOTE: Don't use -int/-bool flags — macOS 15 rejects them in some contexts
+          # Add || true to every line so one failure doesn't kill the step
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden || true
+          sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true || true
+          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0 || true
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword 0 || true
+          defaults write com.apple.screensaver idleTime 0 || true
+          defaults write com.apple.screensaver askForPassword 0 || true
+          defaults write com.apple.screensaver askForPasswordDelay 0 || true
+          defaults -currentHost write com.apple.screensaver idleTime 0 || true
+          defaults -currentHost write com.apple.screensaver askForPassword 0 || true
           
-          # Kill screensaver if running
           killall ScreenSaverEngine 2>/dev/null || true
           
           echo "Ready"
