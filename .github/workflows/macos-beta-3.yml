@@ -32,12 +32,21 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # Change anka user password if it exists
-          # NOTE: dscl -passwd requires OLD password for existing users — use sysadminctl instead
+          # Change anka password (workaround: delete auth first so no old password needed)
           if id anka &>/dev/null; then
-            sudo sysadminctl -resetPasswordFor anka -newPassword kaiden123 2>&1 || \
-            echo "WARNING: Could not change anka password, continuing anyway"
-            echo "Changed anka password"
+            sudo dscl . -delete /Users/anka AuthenticationAuthority 2>/dev/null || true
+            sudo dscl . -passwd /Users/anka "kaiden123" || {
+              # Fallback: try creating password from scratch
+              sudo dscl . -create /Users/anka Password "" 2>/dev/null || true
+              sudo dscl . -passwd /Users/anka "" "kaiden123" 2>/dev/null || true
+            }
+            # Give anka admin rights too
+            sudo dscl . -append /Groups/admin GroupMembership anka 2>/dev/null || true
+            sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership anka 2>/dev/null || true
+            echo "anka ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/anka
+            echo "anka password set to kaiden123"
+          else
+            echo "WARNING: anka user not found"
           fi
           
           # Verify user
