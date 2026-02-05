@@ -67,7 +67,32 @@ jobs:
           echo "=== TCP Keepalive configured ==="
 
       # ========================================
-      # STEP 4: Install BetterDisplay for Virtual Display
+      # STEP 4: TCC Permissions (Before launching apps)
+      # ========================================
+      - name: Configure TCC Permissions
+        run: |
+          echo "=== Configuring TCC Permissions ==="
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          RUSTDESK_BUNDLE="com.carriez.rustdesk"
+          BETTERDISPLAY_BUNDLE="pro.betterdisplay.BetterDisplay"
+          echo "=== Adding Screen Capture permissions ==="
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$BETTERDISPLAY_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          echo "=== Adding Accessibility permissions ==="
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$BETTERDISPLAY_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          echo "=== Adding PostEvent permissions ==="
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServicePostEvent', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          ARD_AGENT="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent"
+          echo "=== Adding ARD Agent permissions ==="
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$ARD_AGENT', 1, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$ARD_AGENT', 1, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
+          echo "=== Verifying TCC entries ==="
+          sudo sqlite3 "$TCC_DB" "SELECT service, client, auth_value FROM access WHERE client LIKE '%rustdesk%' OR client LIKE '%ARD%' OR client LIKE '%BetterDisplay%';"
+          echo "=== TCC Permissions configured ==="
+
+      # ========================================
+      # STEP 5: Install BetterDisplay for Virtual Display
       # ========================================
       - name: Install BetterDisplay (Virtual Display for Headless)
         run: |
@@ -88,39 +113,29 @@ jobs:
             exit 1
           fi
           echo "Waiting for BetterDisplay to initialize..."
-          sleep 10
+          sleep 15
+          
+          echo "=== Checking if BetterDisplay is running ==="
+          pgrep -f BetterDisplay || echo "BetterDisplay not found in process list"
+          
+          echo "=== Getting display identifiers ==="
+          timeout 10s betterdisplaycli get identifiers || echo "Get identifiers timed out or failed"
+          
           echo "=== Creating Virtual Display ==="
-          betterdisplaycli create set --type=VirtualScreen --aspectWidth=16 --aspectHeight=9 --virtualScreenHiDPI=on --sizeInch=27 --virtualScreenName="VirtualDisplay" || echo "Create command completed"
+          timeout 30s betterdisplaycli create set --type=VirtualScreen --virtualScreenName=VirtualDisplay --aspectWidth=16 --aspectHeight=9 --sizeInch=27 || echo "Create command timed out or failed"
           sleep 3
+          
           echo "=== Connecting Virtual Display ==="
-          betterdisplaycli set --name="VirtualDisplay" --connected=on --main=on || echo "Set connected completed"
+          timeout 15s betterdisplaycli set --nameLike=VirtualDisplay --connected=on || echo "Connect command timed out or failed"
           sleep 2
-          betterdisplaycli set --name="VirtualDisplay" --resolution=1920x1080 --refreshRate=60 --hiDPI=on || echo "Set resolution completed"
+          
+          echo "=== Setting resolution ==="
+          timeout 15s betterdisplaycli set --nameLike=VirtualDisplay --resolution=1920x1080 --refreshRate=60 --hiDPI=on || echo "Resolution command timed out or failed"
+          
           echo "=== Listing displays ==="
-          betterdisplaycli list || echo "List command completed"
+          timeout 10s betterdisplaycli get identifiers || echo "List command timed out or failed"
+          
           echo "=== Virtual Display setup complete ==="
-
-      # ========================================
-      # STEP 5: TCC Permissions (Screen Recording/Accessibility)
-      # ========================================
-      - name: Configure TCC Permissions
-        run: |
-          echo "=== Configuring TCC Permissions ==="
-          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          RUSTDESK_BUNDLE="com.carriez.rustdesk"
-          echo "=== Adding Screen Capture permissions ==="
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
-          echo "=== Adding Accessibility permissions ==="
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
-          echo "=== Adding PostEvent permissions ==="
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServicePostEvent', '$RUSTDESK_BUNDLE', 0, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
-          ARD_AGENT="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent"
-          echo "=== Adding ARD Agent permissions ==="
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$ARD_AGENT', 1, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$ARD_AGENT', 1, 2, 0, 1, 0, 'UNUSED', 0, strftime('%s', 'now'));"
-          echo "=== Verifying TCC entries ==="
-          sudo sqlite3 "$TCC_DB" "SELECT service, client, auth_value FROM access WHERE client LIKE '%rustdesk%' OR client LIKE '%ARD%';"
-          echo "=== TCC Permissions configured ==="
 
       # ========================================
       # STEP 6: Configure Apple Remote Desktop (ARD)
@@ -162,23 +177,23 @@ jobs:
           sudo mkdir -p "/Users/kaiden/Library/Application Support/RustDesk/config"
           sudo chown -R kaiden:staff "/Users/kaiden/Library/Application Support/RustDesk"
           echo "=== Writing optimized RustDesk configuration ==="
-          cat << 'RUSTDESK_CONFIG' | sudo tee "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
-          enable-hwcodec = 'N'
-          use-texture-render = 'N'
-          allow-always-software-render = 'Y'
-          allow-auto-disconnect = 'N'
-          auto-disconnect-timeout = '0'
-          image-quality = 'custom'
-          custom-image-quality = '90'
-          custom-fps = '60'
-          codec-preference = 'vp9'
-          enable-abr = 'Y'
-          enable-udp-punch = 'Y'
-          direct-server = 'Y'
-          enable-lan-discovery = 'Y'
-          allow-remove-wallpaper = 'N'
-          allow-auto-accept = 'Y'
-          RUSTDESK_CONFIG
+          {
+            echo "enable-hwcodec = 'N'"
+            echo "use-texture-render = 'N'"
+            echo "allow-always-software-render = 'Y'"
+            echo "allow-auto-disconnect = 'N'"
+            echo "auto-disconnect-timeout = '0'"
+            echo "image-quality = 'custom'"
+            echo "custom-image-quality = '90'"
+            echo "custom-fps = '60'"
+            echo "codec-preference = 'vp9'"
+            echo "enable-abr = 'Y'"
+            echo "enable-udp-punch = 'Y'"
+            echo "direct-server = 'Y'"
+            echo "enable-lan-discovery = 'Y'"
+            echo "allow-remove-wallpaper = 'N'"
+            echo "allow-auto-accept = 'Y'"
+          } | sudo tee "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
           echo "=== Config file contents ==="
           cat "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
           echo "=== Setting permissions ==="
@@ -275,38 +290,37 @@ jobs:
           KEEPALIVE_LOG="/tmp/keepalive.log"
           START_TIME=$(date +%s)
           ITERATION=0
-            while true; do
-              ITERATION=$((ITERATION + 1))
-              CURRENT_TIME=$(date +%s)
-              ELAPSED=$(( (CURRENT_TIME - START_TIME) / 60 ))
-              echo "$(date): Keep-alive iteration $ITERATION (${ELAPSED} minutes elapsed)" | tee -a $KEEPALIVE_LOG
-              if [ $((ITERATION % 5)) -eq 0 ]; then
-                echo "=== Service Health Check ===" | tee -a $KEEPALIVE_LOG
-                if pgrep -f RustDesk; then
-                  echo "RustDesk: RUNNING" | tee -a $KEEPALIVE_LOG
-                else
-                  echo "RustDesk: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
-                  sudo -u kaiden open -a RustDesk
-                fi
-                if tailscale status; then
-                  echo "Tailscale: CONNECTED" | tee -a $KEEPALIVE_LOG
-                  tailscale ip -4 | tee -a $KEEPALIVE_LOG
-                else
-                  echo "Tailscale: DISCONNECTED" | tee -a $KEEPALIVE_LOG
-                fi
-                if pgrep -f ARDAgent; then
-                  echo "ARD Agent: RUNNING" | tee -a $KEEPALIVE_LOG
-                else
-                  echo "ARD Agent: NOT RUNNING" | tee -a $KEEPALIVE_LOG
-                fi
-                if pgrep -f BetterDisplay; then
-                  echo "BetterDisplay: RUNNING" | tee -a $KEEPALIVE_LOG
-                else
-                  echo "BetterDisplay: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
-                  open "/Applications/BetterDisplay.app"
-                fi
-                echo "===========================" | tee -a $KEEPALIVE_LOG
+          while true; do
+            ITERATION=$((ITERATION + 1))
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$(( (CURRENT_TIME - START_TIME) / 60 ))
+            echo "$(date): Keep-alive iteration $ITERATION (${ELAPSED} minutes elapsed)" | tee -a $KEEPALIVE_LOG
+            if [ $((ITERATION % 5)) -eq 0 ]; then
+              echo "=== Service Health Check ===" | tee -a $KEEPALIVE_LOG
+              if pgrep -f RustDesk; then
+                echo "RustDesk: RUNNING" | tee -a $KEEPALIVE_LOG
+              else
+                echo "RustDesk: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
+                sudo -u kaiden open -a RustDesk
               fi
-              sleep 60
-            done
-
+              if tailscale status; then
+                echo "Tailscale: CONNECTED" | tee -a $KEEPALIVE_LOG
+                tailscale ip -4 | tee -a $KEEPALIVE_LOG
+              else
+                echo "Tailscale: DISCONNECTED" | tee -a $KEEPALIVE_LOG
+              fi
+              if pgrep -f ARDAgent; then
+                echo "ARD Agent: RUNNING" | tee -a $KEEPALIVE_LOG
+              else
+                echo "ARD Agent: NOT RUNNING" | tee -a $KEEPALIVE_LOG
+              fi
+              if pgrep -f BetterDisplay; then
+                echo "BetterDisplay: RUNNING" | tee -a $KEEPALIVE_LOG
+              else
+                echo "BetterDisplay: NOT RUNNING - Restarting..." | tee -a $KEEPALIVE_LOG
+                open "/Applications/BetterDisplay.app"
+              fi
+              echo "===========================" | tee -a $KEEPALIVE_LOG
+            fi
+            sleep 60
+          done
