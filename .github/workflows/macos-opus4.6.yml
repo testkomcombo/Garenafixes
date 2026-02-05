@@ -7,9 +7,6 @@ jobs:
   setup-macos:
     runs-on: macos-latest
     timeout-minutes: 360
-    defaults:
-      run:
-        working-directory: /Users/runner
 
     steps:
       # ========================================
@@ -31,7 +28,20 @@ jobs:
           ifconfig | grep -E "^[a-z]|inet "
 
       # ========================================
-      # STEP 2: Create User Account
+      # STEP 2: Install GNU coreutils (for timeout)
+      # ========================================
+      - name: Install GNU coreutils
+        run: |
+          echo "=== Installing GNU coreutils for gtimeout ==="
+          brew install coreutils
+          echo "=== Verifying gtimeout ==="
+          which gtimeout
+          gtimeout --version
+          echo "=== Creating timeout alias ==="
+          echo "gtimeout is available at: $(which gtimeout)"
+
+      # ========================================
+      # STEP 3: Create User Account
       # ========================================
       - name: Create User Account
         run: |
@@ -50,7 +60,7 @@ jobs:
           echo "=== User 'kaiden' created successfully ==="
 
       # ========================================
-      # STEP 3: TCP Keepalive Configuration
+      # STEP 4: TCP Keepalive Configuration
       # ========================================
       - name: Configure TCP Keepalive (Prevent Connection Drops)
         run: |
@@ -67,7 +77,7 @@ jobs:
           echo "=== TCP Keepalive configured ==="
 
       # ========================================
-      # STEP 4: TCC Permissions (Before launching apps)
+      # STEP 5: TCC Permissions (Before launching apps)
       # ========================================
       - name: Configure TCC Permissions
         run: |
@@ -92,7 +102,7 @@ jobs:
           echo "=== TCC Permissions configured ==="
 
       # ========================================
-      # STEP 5: Install BetterDisplay for Virtual Display
+      # STEP 6: Install BetterDisplay for Virtual Display
       # ========================================
       - name: Install BetterDisplay (Virtual Display for Headless)
         run: |
@@ -119,26 +129,26 @@ jobs:
           pgrep -f BetterDisplay || echo "BetterDisplay not found in process list"
           
           echo "=== Getting display identifiers ==="
-          timeout 10s betterdisplaycli get identifiers || echo "Get identifiers timed out or failed"
+          gtimeout 10s betterdisplaycli get identifiers || echo "Get identifiers timed out or failed"
           
           echo "=== Creating Virtual Display ==="
-          timeout 30s betterdisplaycli create set --type=VirtualScreen --virtualScreenName=VirtualDisplay --aspectWidth=16 --aspectHeight=9 --sizeInch=27 || echo "Create command timed out or failed"
+          gtimeout 30s betterdisplaycli create set --type=VirtualScreen --virtualScreenName=VirtualDisplay --aspectWidth=16 --aspectHeight=9 --sizeInch=27 || echo "Create command timed out or failed"
           sleep 3
           
           echo "=== Connecting Virtual Display ==="
-          timeout 15s betterdisplaycli set --nameLike=VirtualDisplay --connected=on || echo "Connect command timed out or failed"
+          gtimeout 15s betterdisplaycli set --nameLike=VirtualDisplay --connected=on || echo "Connect command timed out or failed"
           sleep 2
           
           echo "=== Setting resolution ==="
-          timeout 15s betterdisplaycli set --nameLike=VirtualDisplay --resolution=1920x1080 --refreshRate=60 --hiDPI=on || echo "Resolution command timed out or failed"
+          gtimeout 15s betterdisplaycli set --nameLike=VirtualDisplay --resolution=1920x1080 --refreshRate=60 --hiDPI=on || echo "Resolution command timed out or failed"
           
           echo "=== Listing displays ==="
-          timeout 10s betterdisplaycli get identifiers || echo "List command timed out or failed"
+          gtimeout 10s betterdisplaycli get identifiers || echo "List command timed out or failed"
           
           echo "=== Virtual Display setup complete ==="
 
       # ========================================
-      # STEP 6: Configure Apple Remote Desktop (ARD)
+      # STEP 7: Configure Apple Remote Desktop (ARD)
       # ========================================
       - name: Configure ARD/VNC
         run: |
@@ -155,13 +165,13 @@ jobs:
           echo "=== Restarting ARD Agent ==="
           sudo $KICKSTART -restart -agent -console
           echo "=== Verifying ARD status ==="
-          sudo $KICKSTART -agent -print
+          sudo $KICKSTART -agent -status || echo "Status check completed"
           echo "=== Screen Sharing service status ==="
           sudo launchctl list | grep -i screen || echo "Checking for screensharing..."
           echo "=== ARD Configuration complete ==="
 
       # ========================================
-      # STEP 7: Install and Configure RustDesk
+      # STEP 8: Install and Configure RustDesk
       # ========================================
       - name: Install RustDesk
         run: |
@@ -177,27 +187,27 @@ jobs:
           sudo mkdir -p "/Users/kaiden/Library/Application Support/RustDesk/config"
           sudo chown -R kaiden:staff "/Users/kaiden/Library/Application Support/RustDesk"
           echo "=== Writing optimized RustDesk configuration ==="
-          {
-            echo "enable-hwcodec = 'N'"
-            echo "use-texture-render = 'N'"
-            echo "allow-always-software-render = 'Y'"
-            echo "allow-auto-disconnect = 'N'"
-            echo "auto-disconnect-timeout = '0'"
-            echo "image-quality = 'custom'"
-            echo "custom-image-quality = '90'"
-            echo "custom-fps = '60'"
-            echo "codec-preference = 'vp9'"
-            echo "enable-abr = 'Y'"
-            echo "enable-udp-punch = 'Y'"
-            echo "direct-server = 'Y'"
-            echo "enable-lan-discovery = 'Y'"
-            echo "allow-remove-wallpaper = 'N'"
-            echo "allow-auto-accept = 'Y'"
-          } | sudo tee "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
+          CONFIG_FILE="/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
+          sudo -u kaiden /bin/bash -c "printf '%s\n' \
+            \"enable-hwcodec = 'N'\" \
+            \"use-texture-render = 'N'\" \
+            \"allow-always-software-render = 'Y'\" \
+            \"allow-auto-disconnect = 'N'\" \
+            \"auto-disconnect-timeout = '0'\" \
+            \"image-quality = 'custom'\" \
+            \"custom-image-quality = '90'\" \
+            \"custom-fps = '60'\" \
+            \"codec-preference = 'vp9'\" \
+            \"enable-abr = 'Y'\" \
+            \"enable-udp-punch = 'Y'\" \
+            \"direct-server = 'Y'\" \
+            \"enable-lan-discovery = 'Y'\" \
+            \"allow-remove-wallpaper = 'N'\" \
+            \"allow-auto-accept = 'Y'\" > '$CONFIG_FILE'"
           echo "=== Config file contents ==="
-          cat "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
-          echo "=== Setting permissions ==="
-          sudo chown kaiden:staff "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
+          cat "$CONFIG_FILE"
+          echo "=== Verifying ownership ==="
+          ls -la "/Users/kaiden/Library/Application Support/RustDesk/config/"
           echo "=== RustDesk configuration complete ==="
 
       - name: Start RustDesk Service
@@ -210,14 +220,14 @@ jobs:
           ps aux | grep -i rustdesk | grep -v grep || echo "RustDesk process check complete"
           echo "=== Getting RustDesk ID ==="
           if [ -f "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml" ]; then
-            cat "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml"
+            sudo cat "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml"
           else
             echo "RustDesk.toml not yet created, ID will be shown on first run"
           fi
           echo "=== RustDesk started ==="
 
       # ========================================
-      # STEP 8: Install and Configure Tailscale
+      # STEP 9: Install and Configure Tailscale
       # ========================================
       - name: Install Tailscale
         run: |
@@ -245,7 +255,7 @@ jobs:
           echo "=== Tailscale connected ==="
 
       # ========================================
-      # STEP 9: Display Connection Info
+      # STEP 10: Display Connection Info
       # ========================================
       - name: Display Connection Information
         run: |
@@ -273,14 +283,14 @@ jobs:
           echo ""
           echo "=== Attempting to retrieve RustDesk ID ==="
           if [ -f "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml" ]; then
-            grep -i "id" "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml" || echo "ID not in config"
+            sudo grep -i "id" "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk.toml" || echo "ID not in config"
           fi
           if [ -f "/Library/Application Support/RustDesk/config/RustDesk.toml" ]; then
-            grep -i "id" "/Library/Application Support/RustDesk/config/RustDesk.toml" || echo "ID not in system config"
+            sudo grep -i "id" "/Library/Application Support/RustDesk/config/RustDesk.toml" || echo "ID not in system config"
           fi
 
       # ========================================
-      # STEP 10: Keep Session Alive
+      # STEP 11: Keep Session Alive
       # ========================================
       - name: Keep Session Alive
         run: |
