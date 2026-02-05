@@ -33,9 +33,11 @@ jobs:
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
           # Change anka user password if it exists
+          # NOTE: dscl -passwd requires OLD password for existing users — use sysadminctl instead
           if id anka &>/dev/null; then
-            sudo dscl . -passwd /Users/anka "kaiden123"
-            echo "Changed anka password to kaiden123"
+            sudo sysadminctl -resetPasswordFor anka -newPassword kaiden123 2>&1 || \
+            echo "WARNING: Could not change anka password, continuing anyway"
+            echo "Changed anka password"
           fi
           
           # Verify user
