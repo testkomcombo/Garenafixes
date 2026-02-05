@@ -74,16 +74,6 @@ jobs:
           ls -la /Applications/ | grep -i better || echo "Checking Homebrew Caskroom..."
           ls -la /opt/homebrew/Caskroom/betterdisplay/ || ls -la /usr/local/Caskroom/betterdisplay/ || true
 
-      - name: Install BetterDisplay CLI
-        run: |
-          echo "=== Installing BetterDisplay CLI ==="
-          brew tap waydabber/betterdisplay
-          brew install betterdisplaycli
-          echo "=== Verifying CLI installation ==="
-          which betterdisplaycli || echo "CLI not in PATH, checking brew..."
-          brew list betterdisplaycli
-          echo "=== BetterDisplay CLI installed ==="
-
       - name: Create Virtual Display
         run: |
           echo "=== Starting BetterDisplay ==="
@@ -163,29 +153,24 @@ jobs:
           sudo mkdir -p "/Users/kaiden/Library/Application Support/RustDesk/config"
           sudo chown -R kaiden:staff "/Users/kaiden/Library/Application Support/RustDesk"
           echo "=== Writing optimized RustDesk configuration ==="
-          sudo tee "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml" > /dev/null << 'RUSTDESK_CONFIG'
-          # RustDesk Configuration - High Quality + Fast
-          # Stability Settings (Prevent Freezing)
+          cat > /tmp/rustdesk_config.toml << 'RUSTDESK_CONFIG'
           enable-hwcodec = 'N'
           use-texture-render = 'N'
           allow-always-software-render = 'Y'
           allow-auto-disconnect = 'N'
           auto-disconnect-timeout = '0'
-          # Quality Settings
           image-quality = 'balanced'
           custom-image-quality = '80'
           custom-fps = '60'
           codec-preference = 'vp9'
-          # Performance Settings
           enable-abr = 'Y'
           enable-udp-punch = 'Y'
           direct-server = 'Y'
           enable-lan-discovery = 'Y'
-          # Visual Settings (Keep Animations)
           allow-remove-wallpaper = 'N'
-          # Connection Settings
           allow-auto-accept = 'Y'
           RUSTDESK_CONFIG
+          sed 's/^          //' /tmp/rustdesk_config.toml | sudo tee "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml" > /dev/null
           echo "=== Config file contents ==="
           cat "/Users/kaiden/Library/Application Support/RustDesk/config/RustDesk2.toml"
           echo "=== Setting permissions ==="
