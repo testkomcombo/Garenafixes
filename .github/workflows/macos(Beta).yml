@@ -1,4 +1,4 @@
-name: macOS Remote Desktop
+name: macOS Testing Beta
 
 on:
   workflow_dispatch:
