@@ -1,4 +1,4 @@
-name: macOS Testing Beta
+name: macOS Testing Beta 2
 
 on:
   workflow_dispatch:
