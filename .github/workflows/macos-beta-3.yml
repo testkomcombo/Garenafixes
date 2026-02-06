@@ -32,26 +32,6 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-                    # Change anka password using expect (passwd reads from terminal, not stdin)
-          if id anka &>/dev/null; then
-            sudo /usr/bin/expect <<'EXPECT_EOF'
-            spawn passwd anka
-            expect "New password:"
-            send "kaiden123\r"
-            expect "Retype new password:"
-            send "kaiden123\r"
-            expect eof
-            EXPECT_EOF
-            
-            echo "anka password set to kaiden123"
-            sudo dscl . -append /Groups/admin GroupMembership anka || true
-            sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership anka || true
-            echo "anka ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/anka
-            echo "anka setup done"
-          else
-            echo "WARNING: anka user not found"
-          fi || true
-          
           # Verify user
           echo "=== User Verification ==="
           dscl . -read /Users/kaiden UniqueID
@@ -172,18 +152,12 @@ jobs:
           ENC_ID=$(echo "$ENC_OUTPUT" | grep "encrypted to" | cut -d'"' -f4)
           echo "Encrypted ID: ${ENC_ID:-NOT FOUND}"
           
-          echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
-          if [ -n "$ENC_ID" ]; then
-            echo "ENC_ID=$ENC_ID" >> $GITHUB_ENV
-          fi
-          
           RUSTDESK_BIN="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
           
-          # Kill ALL existing RustDesk processes cleanly
+          # Kill ALL existing RustDesk processes
           echo "=== Stopping existing RustDesk ==="
           sudo pkill -9 -f RustDesk || true
           sleep 3
-          # Verify they're dead
           pgrep -f RustDesk && echo "WARNING: RustDesk still running" || echo "All RustDesk processes stopped"
           
           # Clean config directories
@@ -193,35 +167,40 @@ jobs:
           mkdir -p ~/Library/Preferences/com.carriez.RustDesk
           sudo mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk
           
-          # Write config
-          echo "=== Writing RustDesk config ==="
+          # ===== FIX: enc_id goes in RustDesk.toml (identity file) =====
+          echo "=== Writing RustDesk.toml (identity - enc_id) ==="
+          cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk.toml << EOF
+          ${ENC_ID:+enc_id = '$ENC_ID'}
+          EOF
+          
+          echo "--- RustDesk.toml ---"
+          cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk.toml
+          
+          # ===== Settings go in RustDesk2.toml =====
+          echo "=== Writing RustDesk2.toml (settings - password etc) ==="
           cat > ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml << EOF
           password = 'kaiden123'
           verification-method = 'use-permanent-password'
           approve-mode = 'password'
           direct-server = 'Y'
           direct-access-port = '21118'
-          ${ENC_ID:+enc_id = '$ENC_ID'}
           EOF
           
-          echo "--- Config contents ---"
+          echo "--- RustDesk2.toml ---"
           cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml
-          echo "--- End config ---"
           
+          # Copy BOTH configs to root
+          sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           sudo cp ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml /var/root/Library/Preferences/com.carriez.RustDesk/
           
           # Start RustDesk service (as root)
           echo "=== Starting RustDesk service ==="
           sudo "$RUSTDESK_BIN" --service &
-          SERVICE_PID=$!
-          echo "Service PID: $SERVICE_PID"
           sleep 5
           
           # Start RustDesk server (as user)
           echo "=== Starting RustDesk server ==="
           "$RUSTDESK_BIN" --server &
-          SERVER_PID=$!
-          echo "Server PID: $SERVER_PID"
           sleep 8
           
           # Set password
@@ -242,17 +221,41 @@ jobs:
             sleep 5
           done
           
+          # ===== VALIDATION: Detect broken/default ID =====
+          echo "=== Validating RustDesk ID ==="
+          echo "Expected custom ID: $UNIQUE_ID"
+          echo "Got RustDesk ID:    $RUSTDESK_ID"
+          
+          # Check if we got a broken default ID (9-digit number = auto-generated)
           if [ -z "$RUSTDESK_ID" ]; then
-            echo "ERROR: Could not get RustDesk ID after 5 attempts"
+            echo "::error::RustDesk ID is EMPTY. RustDesk failed to start properly."
+            echo "Please re-run the workflow."
+            exit 1
+          elif echo "$RUSTDESK_ID" | grep -qE '^[0-9]{9,10}$'; then
+            echo "::error::RustDesk returned default auto-generated ID ($RUSTDESK_ID) instead of custom ID."
+            echo "The enc_id was not picked up. This is a known intermittent issue."
+            echo ""
+            echo "=== DEBUG: Checking what configs RustDesk actually loaded ==="
+            echo "--- User RustDesk.toml ---"
+            cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk.toml 2>/dev/null || echo "NOT FOUND"
+            echo "--- Root RustDesk.toml ---"
+            sudo cat /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk.toml 2>/dev/null || echo "NOT FOUND"
+            echo "--- User RustDesk2.toml ---"
+            cat ~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml 2>/dev/null || echo "NOT FOUND"
+            echo "--- Root RustDesk2.toml ---"
+            sudo cat /var/root/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml 2>/dev/null || echo "NOT FOUND"
+            echo ""
+            echo "::error::RustDesk has broken ID. Please re-run the workflow."
+            exit 1
+          else
+            echo "Custom ID verified: $RUSTDESK_ID"
           fi
           
           echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
           
-          # Show all RustDesk processes for debugging
+          # Debug info
           echo "=== RustDesk processes ==="
-          ps aux | grep -i [R]ustDesk || echo "No RustDesk processes found"
-          
-          # Show what ports RustDesk is listening on
+          ps aux | grep -i [R]ustDesk || echo "No RustDesk processes"
           echo "=== RustDesk ports ==="
           sudo lsof -i -P | grep -i [R]ustDesk || echo "No RustDesk ports"
 
