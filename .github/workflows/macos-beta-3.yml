@@ -31,11 +31,10 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # Setup auto-login for kaiden (takes effect on NEXT loginwindow restart,
-          # which happens naturally when VNC connects)
+          # Auto-login config (takes effect when login window processes next login)
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
           
-          # Generate /etc/kcpassword for auto-login
+          # Generate /etc/kcpassword (required for auto-login)
           python3 -c "
           key = [0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F]
           password = 'kaiden123'
@@ -48,24 +47,60 @@ jobs:
           " | sudo tee /etc/kcpassword > /dev/null
           sudo chmod 600 /etc/kcpassword
           
-          # Disable screen lock / screensaver (so VNC doesn't show lock screen)
+          # ===== PREVENT SLEEP - EVERY POSSIBLE SETTING =====
+          sudo pmset -a sleep 0
+          sudo pmset -a displaysleep 0
+          sudo pmset -a disksleep 0
+          sudo pmset -a disablesleep 1
+          sudo pmset -a hibernatemode 0
+          sudo pmset -a standby 0
+          sudo pmset -a standbydelayhigh 0
+          sudo pmset -a standbydelaylow 0
+          sudo pmset -a autopoweroff 0
+          sudo pmset -a autopoweroffdelay 0
+          sudo pmset -a powernap 0
+          sudo pmset -a ttyskeepawake 1
+          sudo pmset -c sleep 0 displaysleep 0
+          sudo pmset -b sleep 0 displaysleep 0
+          
+          # caffeinate ALL flags: display + idle + disk + system + user activity
+          caffeinate -dimsu &
+          
+          # ===== DISABLE SCREEN LOCK - EVERY LEVEL =====
+          # System level
           sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true || true
+          sudo defaults write /Library/Preferences/com.apple.loginwindow DisableFDEAutoLogin -bool false || true
+          sudo defaults write /Library/Preferences/.GlobalPreferences MultipleSessionEnabled -bool true || true
+          
+          # Login window screensaver
           sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0 || true
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword 0 || true
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPasswordDelay 0 || true
+          sudo defaults write /Library/Preferences/com.apple.screensaver idleTime 0 || true
+          
+          # Runner user screensaver
           defaults write com.apple.screensaver idleTime 0 || true
           defaults write com.apple.screensaver askForPassword 0 || true
           defaults write com.apple.screensaver askForPasswordDelay 0 || true
           defaults -currentHost write com.apple.screensaver idleTime 0 || true
           defaults -currentHost write com.apple.screensaver askForPassword 0 || true
           
-          # Create a background login session for kaiden (without killing loginwindow)
-          # This makes kaiden's GUI session available for VNC
-          sudo launchctl asuser $(id -u kaiden) true 2>/dev/null || true
+          # Kaiden user screensaver
+          sudo -u kaiden defaults write com.apple.screensaver idleTime 0 2>/dev/null || true
+          sudo -u kaiden defaults write com.apple.screensaver askForPassword 0 2>/dev/null || true
+          sudo -u kaiden defaults write com.apple.screensaver askForPasswordDelay 0 2>/dev/null || true
+          sudo -u kaiden defaults -currentHost write com.apple.screensaver idleTime 0 2>/dev/null || true
+          sudo -u kaiden defaults -currentHost write com.apple.screensaver askForPassword 0 2>/dev/null || true
           
-          # Prevent sleep
-          sudo pmset -c displaysleep 0 sleep 0
-          sudo pmset -b displaysleep 0 sleep 0
-          sudo pmset -a disablesleep 1
-          caffeinate -d &
+          # Disable hot corners (any corner can trigger screensaver → lock)
+          defaults write com.apple.dock wvous-tl-corner -int 0 || true
+          defaults write com.apple.dock wvous-tr-corner -int 0 || true
+          defaults write com.apple.dock wvous-bl-corner -int 0 || true
+          defaults write com.apple.dock wvous-br-corner -int 0 || true
+          sudo -u kaiden defaults write com.apple.dock wvous-tl-corner -int 0 2>/dev/null || true
+          sudo -u kaiden defaults write com.apple.dock wvous-tr-corner -int 0 2>/dev/null || true
+          sudo -u kaiden defaults write com.apple.dock wvous-bl-corner -int 0 2>/dev/null || true
+          sudo -u kaiden defaults write com.apple.dock wvous-br-corner -int 0 2>/dev/null || true
           
           # Verify
           echo "=== User Verification ==="
@@ -74,7 +109,10 @@ jobs:
           dscl . -read /Users/kaiden PrimaryGroupID
           echo "=== Console User ==="
           stat -f '%Su' /dev/console 2>/dev/null || echo "unknown"
+          echo "=== Power Settings ==="
+          sudo pmset -g
           echo "Ready"
+      
       - name: TCC Permissions
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
@@ -288,8 +326,18 @@ jobs:
             TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
             echo "[$TIMESTAMP] Health check..."
             
-            # Kill screensaver
+            # ===== AGGRESSIVELY PREVENT SLEEP & LOCK =====
+            # Kill screensaver if it started
             killall ScreenSaverEngine 2>/dev/null || true
+            
+            # Assert user activity (prevents idle-triggered sleep/lock)
+            caffeinate -u -t 5 2>/dev/null || true
+            
+            # Simulate key press to reset idle timer
+            osascript -e 'tell application "System Events" to key code 63' 2>/dev/null || true
+            
+            # Re-assert power settings (some processes can override pmset)
+            sudo pmset -a displaysleep 0 sleep 0 2>/dev/null || true
             
             # ARD check (fixed: ARDAgent not "ARD Agent")
             ARD_PROC=$(pgrep -f "ARDAgent" 2>/dev/null || true)
@@ -323,7 +371,6 @@ jobs:
               echo "  RustDesk OK (svc: $RUSTDESK_SERVICE, srv: $RUSTDESK_SERVER)"
             fi
             
-            caffeinate -u -t 1 2>/dev/null || true
-            
-            sleep 300
+            # Check every 2 minutes (shorter interval to catch sleep before it triggers lock)
+            sleep 120
           done
