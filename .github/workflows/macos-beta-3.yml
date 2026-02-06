@@ -32,33 +32,25 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # Change anka password — user is managed by Anka VM, not local directory
-          # dscl can't touch it, but sudo passwd (PAM) can set it as root
+                    # Change anka password using expect (passwd reads from terminal, not stdin)
           if id anka &>/dev/null; then
-            echo "kaiden123" | sudo passwd anka --stdin || \
-            echo -e "kaiden123\nkaiden123" | sudo passwd anka || \
-            {
-              # Last resort: use expect-style approach
-              sudo /usr/bin/script -q /dev/null /bin/bash -c '
-                spawn=$(which expect 2>/dev/null)
-                if [ -z "$spawn" ]; then
-                  # No expect, use script trick
-                  echo "kaiden123" > /tmp/.pw
-                  echo "kaiden123" >> /tmp/.pw
-                  sudo passwd anka < /tmp/.pw
-                  rm -f /tmp/.pw
-                fi
-              ' 2>/dev/null || true
-              echo "WARNING: Could not change anka password automatically"
-            }
-            # These might work even if password change failed
+            sudo /usr/bin/expect <<'EXPECT_EOF'
+            spawn passwd anka
+            expect "New password:"
+            send "kaiden123\r"
+            expect "Retype new password:"
+            send "kaiden123\r"
+            expect eof
+            EXPECT_EOF
+            
+            echo "anka password set to kaiden123"
             sudo dscl . -append /Groups/admin GroupMembership anka || true
             sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership anka || true
             echo "anka ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/anka
             echo "anka setup done"
           else
             echo "WARNING: anka user not found"
-          fi
+          fi || true
           
           # Verify user
           echo "=== User Verification ==="
