@@ -64,35 +64,6 @@ jobs:
           echo "=== Power Settings ==="
           sudo pmset -g | head -15
           echo "Ready"
-
-      - name: Setup ARD/VNC
-        run: |
-          echo "Setting up ARD & VNC..."
-          
-          # REMOVED: VNCAlwaysStartOnConsole (this was causing login screen)
-          # REMOVED: RestoreMachineState, DontSleep, HiddenUsersList, CGSession
-          # Just basic ARD setup — this worked fine before
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
-          
-          # VNC password
-          printf 'kaiden123' | sudo perl -we 'BEGIN{@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA"};read(STDIN,$p,16);@p=unpack"C*",$p;for($i=0;$i<16;$i++){$p[$i]^=$k[$i]};print pack"C*",@p' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
-          sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
-          sudo chown root:wheel /Library/Preferences/com.apple.VNCSettings.txt
-          
-          # Basic kickstart — same as your original that worked
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -privs -all \
-            -configure -clientopts -setvnclegacy -vnclegacy yes \
-            -configure -allowAccessFor -allUsers \
-            -restart -agent -menu 2>&1 | grep -v "No such key" || true
-          
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          
-          sleep 5
-          
-          echo "=== Port Check ==="
-          netstat -an | grep LISTEN | grep -E "\.5900\s" && echo "VNC listening on 5900" || echo "WARNING: VNC not on 5900"
-          sudo lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null || true
       
       - name: TCC Permissions
         run: |
@@ -125,21 +96,19 @@ jobs:
         run: |
           echo "Setting up ARD & VNC..."
           
-          # VNC settings — share console, no extra authentication
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+          # REMOVED: VNCAlwaysStartOnConsole (this was causing login screen)
+          # REMOVED: RestoreMachineState, DontSleep, HiddenUsersList, CGSession
+          # Just basic ARD setup — this worked fine before
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement RestoreMachineState -bool false
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement DontSleep -bool true
           
           # VNC password
           printf 'kaiden123' | sudo perl -we 'BEGIN{@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA"};read(STDIN,$p,16);@p=unpack"C*",$p;for($i=0;$i<16;$i++){$p[$i]^=$k[$i]};print pack"C*",@p' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           sudo chown root:wheel /Library/Preferences/com.apple.VNCSettings.txt
           
-          # Kickstart ARD — enable for ALL users including kaiden
+          # Basic kickstart — same as your original that worked
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -privs -all \
-            -configure -users kaiden -access -on -privs -all \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
             -configure -allowAccessFor -allUsers \
             -restart -agent -menu 2>&1 | grep -v "No such key" || true
@@ -151,8 +120,6 @@ jobs:
           echo "=== Port Check ==="
           netstat -an | grep LISTEN | grep -E "\.5900\s" && echo "VNC listening on 5900" || echo "WARNING: VNC not on 5900"
           sudo lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null || true
-          echo "=== Console User ==="
-          stat -f '%Su' /dev/console 2>/dev/null || echo "unknown"
 
       - name: Install RustDesk
         run: |
