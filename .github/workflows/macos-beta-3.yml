@@ -37,10 +37,10 @@ jobs:
             echo "anka user found, saving attributes..."
             
             # Save anka's existing attributes so we can recreate identically
-            ANKA_UID=$(dscl . -read /Users/anka UniqueID 2>/dev/null | awk '{print $2}')
-            ANKA_GID=$(dscl . -read /Users/anka PrimaryGroupID 2>/dev/null | awk '{print $2}')
-            ANKA_HOME=$(dscl . -read /Users/anka NFSHomeDirectory 2>/dev/null | awk '{print $2}')
-            ANKA_SHELL=$(dscl . -read /Users/anka UserShell 2>/dev/null | awk '{print $2}')
+            ANKA_UID=$(dscl . -read /Users/anka UniqueID | awk '{print $2}')
+            ANKA_GID=$(dscl . -read /Users/anka PrimaryGroupID | awk '{print $2}')
+            ANKA_HOME=$(dscl . -read /Users/anka NFSHomeDirectory | awk '{print $2}')
+            ANKA_SHELL=$(dscl . -read /Users/anka UserShell | awk '{print $2}')
             echo "  UID=$ANKA_UID GID=$ANKA_GID HOME=$ANKA_HOME SHELL=$ANKA_SHELL"
             
             # Delete user record (goes through opendirectoryd, not blocked by SIP)
