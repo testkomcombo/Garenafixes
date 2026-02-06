@@ -32,38 +32,30 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # Change anka password — delete and recreate to bypass auth requirement
+          # Change anka password — user is managed by Anka VM, not local directory
+          # dscl can't touch it, but sudo passwd (PAM) can set it as root
           if id anka &>/dev/null; then
-            echo "anka user found, saving attributes..."
-            
-            # Save anka's existing attributes so we can recreate identically
-            ANKA_UID=$(dscl . -read /Users/anka UniqueID | awk '{print $2}')
-            ANKA_GID=$(dscl . -read /Users/anka PrimaryGroupID | awk '{print $2}')
-            ANKA_HOME=$(dscl . -read /Users/anka NFSHomeDirectory | awk '{print $2}')
-            ANKA_SHELL=$(dscl . -read /Users/anka UserShell | awk '{print $2}')
-            echo "  UID=$ANKA_UID GID=$ANKA_GID HOME=$ANKA_HOME SHELL=$ANKA_SHELL"
-            
-            # Delete user record (goes through opendirectoryd, not blocked by SIP)
-            sudo dscl . -delete /Users/anka
-            sleep 1
-            
-            # Recreate with same attributes — fresh user has no auth data
-            sudo dscl . -create /Users/anka
-            sudo dscl . -create /Users/anka UserShell "${ANKA_SHELL:-/bin/zsh}"
-            sudo dscl . -create /Users/anka RealName "anka"
-            sudo dscl . -create /Users/anka UniqueID "${ANKA_UID:-501}"
-            sudo dscl . -create /Users/anka PrimaryGroupID "${ANKA_GID:-80}"
-            sudo dscl . -create /Users/anka NFSHomeDirectory "${ANKA_HOME:-/Users/anka}"
-            
-            # NOW set password — works because fresh user has no old password
-            sudo dscl . -passwd /Users/anka "kaiden123"
-            
-            # Restore group memberships
+            echo "kaiden123" | sudo passwd anka --stdin || \
+            echo -e "kaiden123\nkaiden123" | sudo passwd anka || \
+            {
+              # Last resort: use expect-style approach
+              sudo /usr/bin/script -q /dev/null /bin/bash -c '
+                spawn=$(which expect 2>/dev/null)
+                if [ -z "$spawn" ]; then
+                  # No expect, use script trick
+                  echo "kaiden123" > /tmp/.pw
+                  echo "kaiden123" >> /tmp/.pw
+                  sudo passwd anka < /tmp/.pw
+                  rm -f /tmp/.pw
+                fi
+              ' 2>/dev/null || true
+              echo "WARNING: Could not change anka password automatically"
+            }
+            # These might work even if password change failed
             sudo dscl . -append /Groups/admin GroupMembership anka || true
-            sudo dscl . -append /Groups/wheel GroupMembership anka || true
             sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership anka || true
             echo "anka ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/anka
-            echo "anka password set to kaiden123"
+            echo "anka setup done"
           else
             echo "WARNING: anka user not found"
           fi
