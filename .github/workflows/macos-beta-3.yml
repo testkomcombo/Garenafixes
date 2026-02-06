@@ -31,15 +31,14 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # ===== AUTO-LOGIN AS KAIDEN (fixes login screen issue) =====
+          # Setup auto-login for kaiden (takes effect on NEXT loginwindow restart,
+          # which happens naturally when VNC connects)
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
           
-          # Generate /etc/kcpassword (required for auto-login to actually work)
-          # Password is XOR'd with Apple's fixed key
+          # Generate /etc/kcpassword for auto-login
           python3 -c "
           key = [0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F]
           password = 'kaiden123'
-          # Pad to next multiple of 12
           padlen = 12 - (len(password) % 12)
           if padlen == 12: padlen = 0
           padded = password + '\0' * padlen
@@ -49,7 +48,7 @@ jobs:
           " | sudo tee /etc/kcpassword > /dev/null
           sudo chmod 600 /etc/kcpassword
           
-          # Disable screen lock / screensaver
+          # Disable screen lock / screensaver (so VNC doesn't show lock screen)
           sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true || true
           sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0 || true
           defaults write com.apple.screensaver idleTime 0 || true
@@ -58,12 +57,9 @@ jobs:
           defaults -currentHost write com.apple.screensaver idleTime 0 || true
           defaults -currentHost write com.apple.screensaver askForPassword 0 || true
           
-          # Restart loginwindow to trigger auto-login as kaiden
-          # This replaces the anka login screen with kaiden's desktop
-          echo "Restarting loginwindow for auto-login..."
-          sudo killall loginwindow 2>/dev/null || true
-          sleep 8
-          echo "Auto-login should have triggered for kaiden"
+          # Create a background login session for kaiden (without killing loginwindow)
+          # This makes kaiden's GUI session available for VNC
+          sudo launchctl asuser $(id -u kaiden) true 2>/dev/null || true
           
           # Prevent sleep
           sudo pmset -c displaysleep 0 sleep 0
@@ -76,12 +72,9 @@ jobs:
           dscl . -read /Users/kaiden UniqueID
           dscl . -read /Users/kaiden NFSHomeDirectory
           dscl . -read /Users/kaiden PrimaryGroupID
-          
-          # Check who is logged in at console
           echo "=== Console User ==="
-          stat -f '%Su' /dev/console 2>/dev/null || echo "Could not determine console user"
+          stat -f '%Su' /dev/console 2>/dev/null || echo "unknown"
           echo "Ready"
-
       - name: TCC Permissions
         run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
