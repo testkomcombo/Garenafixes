@@ -31,10 +31,13 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # Auto-login config (takes effect when login window processes next login)
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
+          # ===== HIDE ANKA FROM LOGIN SCREEN =====
+          # Only kaiden will be visible on the login window
+          sudo defaults write /Library/Preferences/com.apple.loginwindow HiddenUsersList -array anka runner
+          sudo defaults write /Library/Preferences/com.apple.loginwindow lastUserName kaiden
           
-          # Generate /etc/kcpassword (required for auto-login)
+          # Auto-login as kaiden
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser kaiden
           python3 -c "
           key = [0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F]
           password = 'kaiden123'
@@ -47,70 +50,59 @@ jobs:
           " | sudo tee /etc/kcpassword > /dev/null
           sudo chmod 600 /etc/kcpassword
           
-          # ===== PREVENT SLEEP - EVERY POSSIBLE SETTING =====
-          sudo pmset -a sleep 0
-          sudo pmset -a displaysleep 0
-          sudo pmset -a disksleep 0
-          sudo pmset -a disablesleep 1
-          sudo pmset -a hibernatemode 0
-          sudo pmset -a standby 0
-          sudo pmset -a standbydelayhigh 0
-          sudo pmset -a standbydelaylow 0
-          sudo pmset -a autopoweroff 0
-          sudo pmset -a autopoweroffdelay 0
-          sudo pmset -a powernap 0
+          # ===== DISABLE ALL SLEEP =====
+          sudo pmset -a sleep 0 displaysleep 0 disksleep 0
+          sudo pmset -a disablesleep 1 hibernatemode 0
+          sudo pmset -a standby 0 standbydelayhigh 0 standbydelaylow 0
+          sudo pmset -a autopoweroff 0 autopoweroffdelay 0 powernap 0
           sudo pmset -a ttyskeepawake 1
           sudo pmset -c sleep 0 displaysleep 0
           sudo pmset -b sleep 0 displaysleep 0
-          
-          # caffeinate ALL flags: display + idle + disk + system + user activity
           caffeinate -dimsu &
           
-          # ===== DISABLE SCREEN LOCK - EVERY LEVEL =====
-          # System level
+          # ===== DISABLE SCREEN LOCK/SAVER — ALL USERS =====
           sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true || true
           sudo defaults write /Library/Preferences/com.apple.loginwindow DisableFDEAutoLogin -bool false || true
-          sudo defaults write /Library/Preferences/.GlobalPreferences MultipleSessionEnabled -bool true || true
-          
-          # Login window screensaver
           sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0 || true
           sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword 0 || true
-          sudo defaults write /Library/Preferences/com.apple.screensaver askForPasswordDelay 0 || true
           sudo defaults write /Library/Preferences/com.apple.screensaver idleTime 0 || true
           
-          # Runner user screensaver
+          # For runner user
           defaults write com.apple.screensaver idleTime 0 || true
           defaults write com.apple.screensaver askForPassword 0 || true
           defaults write com.apple.screensaver askForPasswordDelay 0 || true
           defaults -currentHost write com.apple.screensaver idleTime 0 || true
           defaults -currentHost write com.apple.screensaver askForPassword 0 || true
           
-          # Kaiden user screensaver
+          # For kaiden user
           sudo -u kaiden defaults write com.apple.screensaver idleTime 0 2>/dev/null || true
           sudo -u kaiden defaults write com.apple.screensaver askForPassword 0 2>/dev/null || true
           sudo -u kaiden defaults write com.apple.screensaver askForPasswordDelay 0 2>/dev/null || true
           sudo -u kaiden defaults -currentHost write com.apple.screensaver idleTime 0 2>/dev/null || true
           sudo -u kaiden defaults -currentHost write com.apple.screensaver askForPassword 0 2>/dev/null || true
           
-          # Disable hot corners (any corner can trigger screensaver → lock)
-          defaults write com.apple.dock wvous-tl-corner -int 0 || true
-          defaults write com.apple.dock wvous-tr-corner -int 0 || true
-          defaults write com.apple.dock wvous-bl-corner -int 0 || true
-          defaults write com.apple.dock wvous-br-corner -int 0 || true
-          sudo -u kaiden defaults write com.apple.dock wvous-tl-corner -int 0 2>/dev/null || true
-          sudo -u kaiden defaults write com.apple.dock wvous-tr-corner -int 0 2>/dev/null || true
-          sudo -u kaiden defaults write com.apple.dock wvous-bl-corner -int 0 2>/dev/null || true
-          sudo -u kaiden defaults write com.apple.dock wvous-br-corner -int 0 2>/dev/null || true
+          # Disable hot corners
+          for user in "" "sudo -u kaiden"; do
+            $user defaults write com.apple.dock wvous-tl-corner -int 0 2>/dev/null || true
+            $user defaults write com.apple.dock wvous-tr-corner -int 0 2>/dev/null || true
+            $user defaults write com.apple.dock wvous-bl-corner -int 0 2>/dev/null || true
+            $user defaults write com.apple.dock wvous-br-corner -int 0 2>/dev/null || true
+          done
+          
+          # ===== TRY TO LOG KAIDEN IN AT CONSOLE =====
+          # CGSession switches the console to kaiden's session without killing loginwindow
+          KAIDEN_UID=$(id -u kaiden)
+          echo "Attempting console login for kaiden (UID: $KAIDEN_UID)..."
+          sudo /System/Library/CoreServices/Menu\ Extras/User.menu/Contents/Resources/CGSession -switchToUserID "$KAIDEN_UID" 2>/dev/null || echo "CGSession switch not available (expected on headless)"
           
           # Verify
           echo "=== User Verification ==="
           dscl . -read /Users/kaiden UniqueID
           dscl . -read /Users/kaiden NFSHomeDirectory
-          dscl . -read /Users/kaiden PrimaryGroupID
           echo "=== Console User ==="
           stat -f '%Su' /dev/console 2>/dev/null || echo "unknown"
           echo "=== Power Settings ==="
-          sudo pmset -g
+          sudo pmset -g | head -20
           echo "Ready"
       
       - name: TCC Permissions
@@ -144,17 +136,21 @@ jobs:
         run: |
           echo "Setting up ARD & VNC..."
           
+          # VNC settings — share console, no extra authentication
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement RestoreMachineState -bool false
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement DontSleep -bool true
           
           # VNC password
           printf 'kaiden123' | sudo perl -we 'BEGIN{@k=unpack"C*",pack"H*","1734516E8BA8C5E2FF1C39567390ADCA"};read(STDIN,$p,16);@p=unpack"C*",$p;for($i=0;$i<16;$i++){$p[$i]^=$k[$i]};print pack"C*",@p' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
           sudo chmod 400 /Library/Preferences/com.apple.VNCSettings.txt
           sudo chown root:wheel /Library/Preferences/com.apple.VNCSettings.txt
           
+          # Kickstart ARD — enable for ALL users including kaiden
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -privs -all \
+            -configure -users kaiden -access -on -privs -all \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
             -configure -allowAccessFor -allUsers \
             -restart -agent -menu 2>&1 | grep -v "No such key" || true
@@ -163,14 +159,9 @@ jobs:
           
           sleep 5
           
-          # Open Finder so desktop isn't empty
-          sudo -u kaiden open -a Finder /Users 2>/dev/null || true
-          
           echo "=== Port Check ==="
           netstat -an | grep LISTEN | grep -E "\.5900\s" && echo "VNC listening on 5900" || echo "WARNING: VNC not on 5900"
           sudo lsof -iTCP:5900 -sTCP:LISTEN 2>/dev/null || true
-          
-          # Check console user
           echo "=== Console User ==="
           stat -f '%Su' /dev/console 2>/dev/null || echo "unknown"
 
@@ -301,22 +292,31 @@ jobs:
 
       - name: Connection Info
         run: |
+          CONSOLE_USER=$(stat -f '%Su' /dev/console 2>/dev/null || echo "unknown")
           echo ""
           echo "==========================================="
           echo "         CONNECTION INFORMATION"
           echo "==========================================="
           echo ""
+          echo "--- RustDesk (RECOMMENDED) ---"
+          echo "RustDesk ID:     ${{ env.RUSTDESK_ID }}"
+          echo "RustDesk Pass:   kaiden123"
+          echo ""
           echo "--- VNC (ARD) ---"
           echo "Address:         vnc://${{ env.TAILSCALE_IP }}:5900"
           echo "Username:        kaiden"
           echo "Password:        kaiden123"
-          echo ""
-          echo "--- RustDesk ---"
-          echo "RustDesk ID:     ${{ env.RUSTDESK_ID }}"
-          echo "RustDesk Pass:   kaiden123"
-          echo "(Use the ID above, NOT the IP address)"
+          if [ "$CONSOLE_USER" = "kaiden" ]; then
+            echo "Status:          kaiden is logged in at console"
+          else
+            echo ""
+            echo "NOTE: First VNC connect may show login screen."
+            echo "      Only kaiden is visible. Log in as kaiden."
+            echo "      After first login it won't ask again."
+          fi
           echo ""
           echo "Tailscale IP:    ${{ env.TAILSCALE_IP }}"
+          echo "Console User:    $CONSOLE_USER"
           echo "==========================================="
           echo ""
 
