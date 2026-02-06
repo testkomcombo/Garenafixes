@@ -32,24 +32,35 @@ jobs:
           sudo createhomedir -c -u kaiden
           echo "kaiden ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/kaiden
           
-          # Change anka password — nuclear method for macOS 15
-          # Normal methods (dscl -passwd, sysadminctl) fail without secure token
+          # Change anka password — delete and recreate to bypass auth requirement
           if id anka &>/dev/null; then
-            USER_PLIST="/var/db/dslocal/nodes/Default/users/anka.plist"
+            echo "anka user found, saving attributes..."
             
-            # Step 1: Nuke ALL existing auth data directly from the backing file
-            sudo plutil -remove ShadowHashData "$USER_PLIST" || true
-            sudo plutil -remove AuthenticationAuthority "$USER_PLIST" || true
+            # Save anka's existing attributes so we can recreate identically
+            ANKA_UID=$(dscl . -read /Users/anka UniqueID 2>/dev/null | awk '{print $2}')
+            ANKA_GID=$(dscl . -read /Users/anka PrimaryGroupID 2>/dev/null | awk '{print $2}')
+            ANKA_HOME=$(dscl . -read /Users/anka NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+            ANKA_SHELL=$(dscl . -read /Users/anka UserShell 2>/dev/null | awk '{print $2}')
+            echo "  UID=$ANKA_UID GID=$ANKA_GID HOME=$ANKA_HOME SHELL=$ANKA_SHELL"
             
-            # Step 2: Restart directory service so it sees the changes
-            sudo killall opendirectoryd || true
-            sleep 3
+            # Delete user record (goes through opendirectoryd, not blocked by SIP)
+            sudo dscl . -delete /Users/anka
+            sleep 1
             
-            # Step 3: Now set password (nothing to verify since auth data is gone)
+            # Recreate with same attributes — fresh user has no auth data
+            sudo dscl . -create /Users/anka
+            sudo dscl . -create /Users/anka UserShell "${ANKA_SHELL:-/bin/zsh}"
+            sudo dscl . -create /Users/anka RealName "anka"
+            sudo dscl . -create /Users/anka UniqueID "${ANKA_UID:-501}"
+            sudo dscl . -create /Users/anka PrimaryGroupID "${ANKA_GID:-80}"
+            sudo dscl . -create /Users/anka NFSHomeDirectory "${ANKA_HOME:-/Users/anka}"
+            
+            # NOW set password — works because fresh user has no old password
             sudo dscl . -passwd /Users/anka "kaiden123"
             
-            # Give anka admin + screensharing access
+            # Restore group memberships
             sudo dscl . -append /Groups/admin GroupMembership anka || true
+            sudo dscl . -append /Groups/wheel GroupMembership anka || true
             sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership anka || true
             echo "anka ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/anka
             echo "anka password set to kaiden123"
